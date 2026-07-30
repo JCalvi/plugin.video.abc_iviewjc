@@ -1,4 +1,4 @@
-# ABC iview JC
+# ABC iView
 
 An unofficial ABC iview video add-on for Kodi.
 
