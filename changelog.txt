@@ -1,0 +1,13 @@
+ABC iview JC changelog
+
+1.0.0 - 2026-07-30
+- First packaged release under the plugin.video.abc_iviewjc add-on ID.
+- Added ABC Account QR-code/device-code linking.
+- Added My Watchlist.
+- Added Continue Watching.
+- Added live ABC channel browsing and playback.
+- Renamed the live-channel menu entry to Watch Live to distinguish it from
+  ABC's separate ABC TV editorial catalogue section.
+- Updated category, collection, series and episode handling for current ABC
+  catalogue responses.
+- Added README, GPLv3 licence, metadata, disclaimer and release documentation.

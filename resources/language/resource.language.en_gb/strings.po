@@ -1,0 +1,41 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: ABC iview JC 1.0.0\n"
+"Language: en_GB\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgctxt "#30000"
+msgid "Login"
+msgstr ""
+
+msgctxt "#30001"
+msgid "Logout"
+msgstr ""
+
+msgctxt "#30002"
+msgid "Watch Live"
+msgstr ""
+
+msgctxt "#30003"
+msgid "Search"
+msgstr ""
+
+msgctxt "#30009"
+msgid "Are you sure you want to log out?"
+msgstr ""
+
+msgctxt "#30010"
+msgid "My Watchlist"
+msgstr ""
+
+msgctxt "#30011"
+msgid "Continue Watching"
+msgstr ""
+
+msgctxt "#30012"
+msgid "ABC Account linked"
+msgstr ""
+
+msgctxt "#30013"
+msgid "ABC Account session expired. Please link the device again."
+msgstr ""
