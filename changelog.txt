@@ -1,4 +1,4 @@
-ABC iview JC changelog
+ABC iView changelog
 
 1.0.0 - 2026-07-30
 - First packaged release under the plugin.video.abc_iviewjc add-on ID.

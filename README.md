@@ -1,9 +1,9 @@
 # ABC iView
 
-An unofficial ABC iview video add-on for Kodi.
+An unofficial ABC iView video add-on for Kodi.
 
 The add-on uses a unique Kodi add-on ID, `plugin.video.abc_iviewjc`, so it can
-be installed alongside the older `plugin.video.abc_iview` add-on.
+be installed alongside the older aussieaddons `plugin.video.abc_iview` add-on.
 
 ## Features
 
