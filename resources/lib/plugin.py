@@ -91,6 +91,50 @@ def logout(**kwargs):
 
 
 @plugin.route()
+@plugin.login_required()
+def add_watchlist(show_id, title='', thumb='', **kwargs):
+    try:
+        api.add_to_watchlist(show_id)
+    except Exception as exc:
+        log.exception('Unable to add show {} to ABC watchlist: {}'.format(show_id, exc))
+        gui.notification(
+            'Unable to add to My Watchlist: {}'.format(exc),
+            heading=title or 'ABC iView',
+            icon=thumb or None,
+        )
+        return
+
+    gui.notification(
+        'Added to My Watchlist',
+        heading=title or 'ABC iView',
+        icon=thumb or None,
+    )
+    gui.refresh()
+
+
+@plugin.route()
+@plugin.login_required()
+def remove_watchlist(show_id, title='', thumb='', **kwargs):
+    try:
+        api.remove_from_watchlist(show_id)
+    except Exception as exc:
+        log.exception('Unable to remove show {} from ABC watchlist: {}'.format(show_id, exc))
+        gui.notification(
+            'Unable to remove from My Watchlist: {}'.format(exc),
+            heading=title or 'ABC iView',
+            icon=thumb or None,
+        )
+        return
+
+    gui.notification(
+        'Removed from My Watchlist',
+        heading=title or 'ABC iView',
+        icon=thumb or None,
+    )
+    gui.refresh()
+
+
+@plugin.route()
 def watchlist(**kwargs):
     folder = plugin.Folder('My Watchlist')
     for item in api.get_watchlist():
@@ -136,7 +180,7 @@ def collection(collection_id, **kwargs):
 
 
 @plugin.route()
-def series(url, **kwargs):
+def series(url, from_series_list=False, **kwargs):
     data = api.get_series(url)
     embedded = data.get('_embedded', {}) if isinstance(data, dict) else {}
     highlight = embedded.get('highlightVideo') if isinstance(embedded, dict) else None
@@ -163,17 +207,40 @@ def series(url, **kwargs):
     folder = plugin.Folder(title, fanart=_thumb(data))
     series_list = embedded.get('seriesList', [])
     selected = embedded.get('selectedSeries', {})
-    if len(series_list) > 1:
+
+    # The show endpoint always returns seriesList, even after a particular
+    # season has been selected. Use an explicit route flag so selecting a
+    # season displays its episodes instead of presenting the season list again.
+    show_season_list = len(series_list) > 1 and str(from_series_list).lower() not in ('1', 'true', 'yes')
+
+    if show_season_list:
+        selected_id = selected.get('id')
         for row in series_list:
             href = row.get('_links', {}).get('deeplink', {}).get('href')
-            if href:
-                folder.add_item(label=row.get('title', ''), art=_art(row), path=plugin.url_for(series, url=href))
+            if not href:
+                continue
+
+            label = row.get('title') or row.get('displayTitle') or 'Season'
+            if row.get('id') == selected_id:
+                label = '{} (Current)'.format(label)
+
+            folder.add_item(
+                label=label,
+                art=_art(row),
+                path=plugin.url_for(series, url=href, from_series_list=True),
+            )
     else:
-        episodes = selected.get('_embedded', {}).get('videoEpisodes') or selected.get('_embedded', {}).get('videoExtras', [])
-        for episode in episodes or []:
+        selected_embedded = selected.get('_embedded', {}) if isinstance(selected, dict) else {}
+        episodes = (
+            selected_embedded.get('videoEpisodes')
+            or selected_embedded.get('videoExtras')
+            or []
+        )
+        for episode in episodes:
             parsed = _parse_video(episode, fanart=_thumb(data))
             if parsed:
                 folder.add_items([parsed])
+
     return folder
 
 
@@ -301,7 +368,7 @@ def _parse_show(item):
         log.error('ABC SHOW HAS NO LINK: {}'.format(item))
         return None
 
-    return plugin.Item(
+    parsed = plugin.Item(
         label=label,
         info={
             'title': title or label,
@@ -311,6 +378,39 @@ def _parse_show(item):
         art=_art(item),
         path=plugin.url_for(series, url=href),
     )
+
+    show_id = _show_id(item)
+    if api.logged_in and show_id:
+        try:
+            in_watchlist = api.is_in_watchlist(show_id)
+        except Exception as exc:
+            # Catalogue browsing should continue even if Seesaw is temporarily
+            # unavailable. In that case no potentially incorrect menu is shown.
+            log.warning('Unable to determine watchlist state for show {}: {}'.format(show_id, exc))
+        else:
+            thumb = _thumb(item) or ''
+            if in_watchlist:
+                parsed.context.append((
+                    'Remove from My Watchlist',
+                    'RunPlugin({})'.format(plugin.url_for(
+                        remove_watchlist,
+                        show_id=show_id,
+                        title=title or label,
+                        thumb=thumb,
+                    )),
+                ))
+            else:
+                parsed.context.append((
+                    'Add to My Watchlist',
+                    'RunPlugin({})'.format(plugin.url_for(
+                        add_watchlist,
+                        show_id=show_id,
+                        title=title or label,
+                        thumb=thumb,
+                    )),
+                ))
+
+    return parsed
 
 
 def _parse_video(item, fanart=None):
@@ -341,6 +441,26 @@ def _parse_video(item, fanart=None):
         'episode': episode, 'duration': item.get('duration'), 'mpaa': item.get('classification', ''),
         'mediatype': 'episode'}, art={'thumb': _thumb(item), 'fanart': fanart or _thumb(item)},
         path=plugin.url_for(play, url=href, house_number=hn), playable=True)
+
+
+def _show_id(item):
+    links = item.get('_links') if isinstance(item.get('_links'), dict) else {}
+    show_link = links.get('show') if isinstance(links.get('show'), dict) else {}
+
+    # Series/season records use a composite id such as 316110-2, while the
+    # Seesaw watchlist requires the parent show's numeric id.
+    value = (
+        show_link.get('id')
+        or item.get('showId')
+        or item.get('showID')
+        or item.get('show_id')
+    )
+    if value is None:
+        value = item.get('id')
+
+    if value is None or value == '':
+        return None
+    return str(value)
 
 
 def _thumb(item):

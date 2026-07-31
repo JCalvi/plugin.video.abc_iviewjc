@@ -316,18 +316,87 @@ class API(object):
                 return self.get_collection(collection.get('id'))
         return []
 
-    def get_watchlist(self):
+    def _get_watchlist_entries(self):
         self._refresh_token()
         uid = userdata.get('uid')
-        data = self._session.get(SEESAW_URL + '/v1/saved/watchlist/show', params={
+        response = self._session.get(SEESAW_URL + '/v1/saved/watchlist/show', params={
             'source': 'iview', 'slug': 'watchlist', 'raw': 1, 'done': 0, 'UID': uid,
-        }).json()
-        ids = [str(x.get('key')) for x in data.get('data', []) if x.get('key')]
+        })
+        data = self._json(response, 'ABC watchlist')
+        return data.get('data', []) if isinstance(data, dict) else []
+
+    def _cache_watchlist_ids(self, ids):
+        self._watchlist_ids = set(str(value) for value in ids if value is not None)
+        self._watchlist_ids_expires = time.time() + 300
+
+    def clear_watchlist_cache(self):
+        self._watchlist_ids = None
+        self._watchlist_ids_expires = 0
+
+    def get_watchlist_ids(self, force=False):
+        if not self.logged_in:
+            return set()
+
+        ids = getattr(self, '_watchlist_ids', None)
+        expires = getattr(self, '_watchlist_ids_expires', 0)
+        if not force and ids is not None and expires > time.time():
+            return set(ids)
+
+        entries = self._get_watchlist_entries()
+        self._cache_watchlist_ids(row.get('key') for row in entries if row.get('key'))
+        return set(self._watchlist_ids)
+
+    def is_in_watchlist(self, show_id):
+        return str(show_id) in self.get_watchlist_ids()
+
+    def get_watchlist(self):
+        entries = self._get_watchlist_entries()
+        ids = [str(row.get('key')) for row in entries if row.get('key')]
+        self._cache_watchlist_ids(ids)
         if not ids:
             return []
-        shows = self._session.get(API_BASE_URL + '/v3/shows/{}'.format(','.join(ids))).json()
+
+        response = self._session.get(API_BASE_URL + '/v3/shows/{}'.format(','.join(ids)))
+        shows = self._json(response, 'ABC watchlist shows')
         order = {value: index for index, value in enumerate(ids)}
-        return sorted(shows if isinstance(shows, list) else [], key=lambda x: order.get(str(x.get('id')), 99999))
+        return sorted(
+            shows if isinstance(shows, list) else [],
+            key=lambda item: order.get(str(item.get('id')), 99999),
+        )
+
+    def _change_watchlist(self, show_id, add):
+        self._refresh_token()
+        uid = userdata.get('uid')
+        show_id = str(show_id)
+        url = SEESAW_URL + '/v2/saved/watchlist/show/{}'.format(show_id)
+        params = {'UID': uid, 'source': 'iview', 'raw': 1}
+
+        if add:
+            response = self._session.post(url, params=params, json={})
+            action = 'Add to ABC watchlist'
+        else:
+            response = self._session.delete(url, params=params, json={})
+            action = 'Remove from ABC watchlist'
+
+        data = self._json(response, action)
+
+        # Keep an existing in-memory cache accurate. If it has not yet been
+        # loaded, leave it unset so the next listing obtains the complete set.
+        ids = getattr(self, '_watchlist_ids', None)
+        if ids is not None:
+            if add:
+                ids.add(show_id)
+            else:
+                ids.discard(show_id)
+            self._watchlist_ids_expires = time.time() + 300
+
+        return data
+
+    def add_to_watchlist(self, show_id):
+        return self._change_watchlist(show_id, True)
+
+    def remove_from_watchlist(self, show_id):
+        return self._change_watchlist(show_id, False)
 
     def get_continue_watching(self):
         self._refresh_token()
@@ -386,5 +455,6 @@ class API(object):
         ):
             userdata.delete(key)
 
+        self.clear_watchlist_cache()
         self.logged_in = False
         self._session = Session(HEADERS)

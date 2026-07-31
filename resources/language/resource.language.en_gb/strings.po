@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: ABC iView 1.0.0\n"
+"Project-Id-Version: ABC iView 1.0.2\n"
 "Language: en_GB\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 

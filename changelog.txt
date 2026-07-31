@@ -1,3 +1,14 @@
+1.0.2 - 2026-07-31
+- Added Add to My Watchlist and Remove from My Watchlist context-menu actions.
+- Added five-minute watchlist-state caching while browsing.
+- Refreshes the current Kodi listing after a watchlist change.
+- Added success and error notifications for watchlist changes.
+- Uses ABC's authenticated v2 Seesaw show-watchlist write endpoint.
+
+1.0.1 - 2026-07-30
+- Fixed multi-season shows: selecting a season now opens that season's episodes
+  instead of repeatedly displaying the season list.
+
 ABC iView changelog
 
 1.0.0 - 2026-07-30

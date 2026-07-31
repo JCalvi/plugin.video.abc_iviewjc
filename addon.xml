@@ -2,7 +2,7 @@
 <addon id="plugin.video.abc_iviewjc"
        name="ABC iView"
        provider-name="JCalvi"
-       version="1.0.0">
+       version="1.0.2">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -15,7 +15,12 @@
     <summary lang="en_GB">ABC iview for Kodi with ABC Account support</summary>
     <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes live ABC channels, QR-code device linking, My Watchlist and Continue Watching.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>1.0.0
+    <news>1.0.2
+- Added Add to My Watchlist and Remove from My Watchlist context-menu actions
+- Added five-minute watchlist-state caching with immediate refresh after changes
+- Uses the current authenticated ABC Seesaw watchlist API
+
+1.0.1
 - Added ABC Account QR-code device linking
 - Added My Watchlist and Continue Watching
 - Added live ABC channels
