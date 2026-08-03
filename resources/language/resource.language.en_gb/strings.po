@@ -51,3 +51,35 @@ msgstr ""
 msgctxt "#30022"
 msgid "Write detailed ABC iView watched-sync diagnostics to kodi.log. Diagnostics are also enabled automatically when Kodi global debug logging is enabled."
 msgstr ""
+
+msgctxt "#30030"
+msgid "Library Integration"
+msgstr ""
+
+msgctxt "#30031"
+msgid "Enable Library Integration"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Add qualifying ABC iView shows to Kodi's TV library. Choose the qualification rule below. All currently available seasons and episodes are imported for each qualifying show."
+msgstr ""
+
+msgctxt "#30033"
+msgid "Shows to include"
+msgstr ""
+
+msgctxt "#30034"
+msgid "Open the selector and choose manual selection, shows with a currently available watched episode, or shows saved in My Watchlist. The choice is written and verified before it is applied."
+msgstr ""
+
+msgctxt "#30035"
+msgid "Manual selection only"
+msgstr ""
+
+msgctxt "#30036"
+msgid "Shows with a currently available watched episode"
+msgstr ""
+
+msgctxt "#30037"
+msgid "My Watchlist only"
+msgstr ""

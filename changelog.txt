@@ -1,3 +1,50 @@
+2.0.5
+- Replaced the unreliable native library-scope list with an explicit three-option selector
+- Saves with xbmcaddon.Addon().getSettings().setInt()
+- Uses a changing hidden legacy string write to force Kodi to flush settings to disk
+- Verifies both a fresh Settings wrapper and profile/settings.xml before reporting success
+- Requests immediate library requalification and pruning after a successful mode change
+
+2.0.4
+- Restored Manual selection only library mode
+- Added manual Add to/Remove from Kodi Library show context actions
+- Replaced the faulty string-backed selector with an integer-backed Kodi list
+- Uses a new setting id to discard invalid 2.0.3 selector values
+- Watched-currently-available remains the default mode
+
+2.0.3
+- Fixed persistence of the Shows to include setting
+- Uses stable string values rather than a display-list index
+- Added My Watchlist only library mode
+- Mode changes automatically reconcile, prune and rescan the ABC library
+- Watchlist changes request prompt reconciliation
+
+2.0.2
+- Only a currently available watched episode can qualify a show for the Kodi library
+- Expired ABC viewing-history entries no longer qualify a show
+- Existing shows qualified only by expired history are removed and cleaned from Kodi
+- Temporary availability-check failures do not destructively remove existing shows
+
+2.0.1
+- Library Integration enabled by default
+- SlyGuy CommonSettings retained
+- Only shows with one or more watched episodes qualify for the Kodi library
+- Incomplete and zero-progress ABC history no longer qualifies a show
+- Starting or partially watching a show no longer imports it
+- Qualified shows still import every currently available episode and season
+- Existing unqualified generated shows are removed and cleaned from Kodi
+- Local Kodi watched state protects a show while ABC history is updating
+
+2.0.0
+- Optional Kodi TV library integration for followed ABC iView shows
+- Entire currently available show imported after any episode is started
+- Existing ABC viewing history bootstraps followed shows
+- New seasons and episodes are added automatically
+- Previously imported episodes are retained for cross-season continuity
+- Library watched/unwatched/resume changes sync back to ABC
+- STRM playback routes through this add-on
+- Targeted library diagnostics use the IVIEW200LIB prefix
+
 1.1.5
 - Production release of the 1.1.4.2 watched-state race fix
 - Optional targeted diagnostic logging under Add-on Settings > Diagnostics

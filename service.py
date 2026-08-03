@@ -13,6 +13,12 @@ from resources.lib.diagnostics import (
     diagnostic_event,
     diagnostics_enabled,
 )
+from resources.lib.libraryintegration import (
+    LibraryIntegration,
+    request_episode_state,
+    request_follow_show,
+    request_reconcile_show,
+)
 from resources.lib.watchaction import (
     enqueue_action,
     mark_context_closed,
@@ -123,6 +129,10 @@ class ABCPlayer(xbmc.Player):
             self.duration = 0
         self.position = 0
         self.last_synced = -1
+        library_service.on_playback_started(
+            self.show_id,
+            self.house_number,
+        )
 
     def onPlayBackEnded(self):
         diag(
@@ -165,6 +175,12 @@ class ABCPlayer(xbmc.Player):
             if api.logged_in:
                 api.set_video_progress(self.show_id, self.house_number, self.position, done=False)
                 self.last_synced = self.position
+                library_service.on_playback_progress(
+                    self.show_id,
+                    self.house_number,
+                    self.position,
+                    self.duration,
+                )
         except Exception as exc:
             log.warning('ABC watched sync progress failed for {}: {}'.format(self.house_number, exc))
 
@@ -186,6 +202,13 @@ class ABCPlayer(xbmc.Player):
         except Exception as exc:
             log.warning('ABC watched sync completion failed for {}: {}'.format(self.house_number, exc))
         finally:
+            library_service.on_playback_finished(
+                self.show_id,
+                self.house_number,
+                watched,
+                self.position,
+                self.duration,
+            )
             self.reset()
 
 
@@ -202,8 +225,9 @@ class ABCMonitor(xbmc.Monitor):
     SELECTION_GRACE = 4.0
     NOTIFICATION_GRACE = 4.0
 
-    def __init__(self):
+    def __init__(self, library):
         super(ABCMonitor, self).__init__()
+        self.library = library
         self._last_item = None
         self._last_seen = 0.0
         self._last_playcount = None
@@ -222,6 +246,7 @@ class ABCMonitor(xbmc.Monitor):
         )
 
     def onNotification(self, sender, method, data):
+        self.library.handle_notification(method, data)
         if method != 'VideoLibrary.OnUpdate':
             return
 
@@ -233,6 +258,16 @@ class ABCMonitor(xbmc.Monitor):
         try:
             payload = json.loads(data) if data else {}
             if isinstance(payload, dict):
+                notification_item = payload.get('item')
+                if (
+                    isinstance(notification_item, dict)
+                    and notification_item.get('type') == 'episode'
+                    and notification_item.get('id') is not None
+                ):
+                    # LibraryIntegration resolves this database episode and
+                    # feeds it back through _sync_state without relying on a
+                    # selected plugin ListItem.
+                    return
                 value = payload.get('playcount')
                 if value is None and isinstance(payload.get('item'), dict):
                     value = payload['item'].get('playcount')
@@ -343,6 +378,24 @@ class ABCMonitor(xbmc.Monitor):
             1 if watched else 0,
             source='playcount_transition',
         )
+        if watched:
+            request_follow_show(
+                item['show_id'],
+                source='watched_toggle',
+                house_number=item['house_number'],
+            )
+        else:
+            request_reconcile_show(
+                item['show_id'],
+                source='unwatched_toggle',
+            )
+        request_episode_state(
+            item['show_id'],
+            item['house_number'],
+            1 if watched else 0,
+            duration=item.get('duration') or 0,
+            source='watched_toggle',
+        )
         diag(
             'sync_state_queued',
             item=item,
@@ -437,6 +490,14 @@ class ABCMonitor(xbmc.Monitor):
             # undo the playcount Kodi has just set.
 
     def poll_watched_toggle(self):
+        for library_item, library_playcount in self.library.pop_watched_updates():
+            diag(
+                'library_playcount_transition',
+                item=library_item,
+                playcount=library_playcount,
+            )
+            self._sync_state(library_item, library_playcount)
+
         now = time.time()
         diagnostic = diagnostics_enabled()
         gui_state = raw_gui_state(full=diagnostic)
@@ -661,8 +722,9 @@ class ABCMonitor(xbmc.Monitor):
 
 
 diag('service_objects_begin')
+library_service = LibraryIntegration()
 player = ABCPlayer()
-monitor = ABCMonitor()
+monitor = ABCMonitor(library_service)
 diag('service_loop_started', gui=raw_gui_state())
 while not monitor.abortRequested():
     if player.isPlayingVideo():
@@ -671,6 +733,7 @@ while not monitor.abortRequested():
 
     monitor.poll_watched_toggle()
     monitor.process_action_queue()
+    library_service.tick(playing=player.isPlayingVideo())
 
     if monitor.waitForAbort(CONTEXT_POLL_INTERVAL):
         break

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 import time
 import uuid
 
@@ -341,6 +342,15 @@ class API(object):
         data = self._session.get(API_BASE_URL + '/v2/collection/{}'.format(collection_id)).json()
         return data.get('items', [])
 
+    def get_show(self, show_id):
+        response = self._session.get(
+            API_BASE_URL + '/v3/shows/{}'.format(show_id)
+        )
+        data = self._json(response, 'ABC show details')
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data if isinstance(data, dict) else {}
+
     def get_series(self, series_url):
         return self._session.get(API_BASE_URL + '/v2{}?embed=seriesList,selectedSeries'.format(series_url)).json()
 
@@ -496,9 +506,12 @@ class API(object):
                 key = row.get('key')
                 if not key:
                     continue
+                namespace = str(row.get('namespace') or '')
+                show_match = re.search(r'(?:^|:)show:([^:]+):video(?:$|:)', namespace)
                 history[str(key)] = {
                     'done': bool(done or row.get('done')),
                     'progress': int(row.get('progress') or 0),
+                    'show_id': show_match.group(1) if show_match else '',
                 }
 
         self._history = history
@@ -516,6 +529,9 @@ class API(object):
             ],
         )
         return dict(history)
+
+    def get_history(self, force=False):
+        return self._load_history(force=force)
 
     def get_history_state(self, house_number):
         if not house_number:

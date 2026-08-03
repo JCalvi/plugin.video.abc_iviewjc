@@ -71,3 +71,12 @@ their respective owners. Availability and APIs may change without notice.
 
 The source code is distributed under the GNU General Public License,
 version 3. See `LICENSE`.
+
+
+## Library Integration (2.0)
+
+Enable **Settings > Library Integration > Enable Library Integration** to create a small local Kodi TV library. Select **Shows to include** to open an explicit three-option selector: **Manual selection only**, **Shows with a currently available watched episode** (default), or **My Watchlist only**. The selector writes the setting, forces a Kodi settings-file flush, and verifies the saved value before confirming success. In manual mode, use a show's context menu to add or remove it from the Kodi library selection. Once qualified, the add-on imports all currently available seasons and episodes for that show, refreshes them periodically, and routes playback back through the add-on using `.strm` files.
+
+The watched mode requires at least one currently available episode with a genuine watched/playcount state. Starting or partially watching an episode does not qualify a new show.
+
+The generated library is stored under the add-on profile. Version 2.0 automatically adds and configures the source on Kodi installations using the normal local SQLite video database. Remote MySQL/MariaDB video databases require manual source configuration.

@@ -10,6 +10,13 @@ from .api import API
 from .language import _
 from .settings import settings
 from .diagnostics import diagnostic_event
+from .libraryintegration import (
+    is_manual_show,
+    request_episode_state,
+    request_follow_show,
+    request_reconcile_show,
+    set_manual_show,
+)
 from .watchaction import (
     apply_pending_state,
     consume_context_refresh,
@@ -35,6 +42,24 @@ def before_dispatch():
             'dispatch_action',
             house_number=action['item']['house_number'],
             playcount=action['playcount'],
+        )
+        if int(action['playcount'] or 0) > 0:
+            request_follow_show(
+                action['item']['show_id'],
+                source='plugin_watched_toggle',
+                house_number=action['item']['house_number'],
+            )
+        else:
+            request_reconcile_show(
+                action['item']['show_id'],
+                source='plugin_unwatched_toggle',
+            )
+        request_episode_state(
+            action['item']['show_id'],
+            action['item']['house_number'],
+            action['playcount'],
+            duration=action['item'].get('duration') or 0,
+            source='plugin_watched_toggle',
         )
 
     api.new_session()
@@ -121,6 +146,30 @@ def logout(**kwargs):
 
 
 @plugin.route()
+def add_to_library(show_id, title='', thumb='', **kwargs):
+    changed = set_manual_show(show_id, True)
+    gui.notification(
+        'Added to manual Kodi library selection' if changed
+        else 'Already in manual Kodi library selection',
+        heading=title or 'ABC iView',
+        icon=thumb or None,
+    )
+    gui.refresh()
+
+
+@plugin.route()
+def remove_from_library(show_id, title='', thumb='', **kwargs):
+    changed = set_manual_show(show_id, False)
+    gui.notification(
+        'Removed from manual Kodi library selection' if changed
+        else 'Not in manual Kodi library selection',
+        heading=title or 'ABC iView',
+        icon=thumb or None,
+    )
+    gui.refresh()
+
+
+@plugin.route()
 @plugin.login_required()
 def add_watchlist(show_id, title='', thumb='', **kwargs):
     try:
@@ -134,6 +183,7 @@ def add_watchlist(show_id, title='', thumb='', **kwargs):
         )
         return
 
+    request_reconcile_show(show_id, source='watchlist_added')
     gui.notification(
         'Added to My Watchlist',
         heading=title or 'ABC iView',
@@ -156,6 +206,7 @@ def remove_watchlist(show_id, title='', thumb='', **kwargs):
         )
         return
 
+    request_reconcile_show(show_id, source='watchlist_removed')
     gui.notification(
         'Removed from My Watchlist',
         heading=title or 'ABC iView',
@@ -173,6 +224,18 @@ def mark_watched(show_id, house_number, duration=0, title='', thumb='', **kwargs
         except Exception:
             progress = 0
         api.mark_video_watched(show_id, house_number, progress=progress)
+        request_follow_show(
+            show_id,
+            source='mark_watched_route',
+            house_number=house_number,
+        )
+        request_episode_state(
+            show_id,
+            house_number,
+            1,
+            duration=progress,
+            source='mark_watched_route',
+        )
     except Exception as exc:
         log.exception('Unable to mark {} watched: {}'.format(house_number, exc))
         gui.notification('Unable to mark watched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
@@ -187,6 +250,16 @@ def mark_watched(show_id, house_number, duration=0, title='', thumb='', **kwargs
 def mark_unwatched(show_id, house_number, title='', thumb='', **kwargs):
     try:
         api.mark_video_unwatched(show_id, house_number)
+        request_episode_state(
+            show_id,
+            house_number,
+            0,
+            source='mark_unwatched_route',
+        )
+        request_reconcile_show(
+            show_id,
+            source='mark_unwatched_route',
+        )
     except Exception as exc:
         log.exception('Unable to mark {} unwatched: {}'.format(house_number, exc))
         gui.notification('Unable to mark unwatched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
@@ -456,6 +529,29 @@ def _parse_show(item):
     )
 
     show_id = _show_id(item)
+    if show_id:
+        thumb = _thumb(item) or ''
+        if is_manual_show(show_id):
+            parsed.context.append((
+                'Remove from Kodi Library (manual)',
+                'RunPlugin({})'.format(plugin.url_for(
+                    remove_from_library,
+                    show_id=show_id,
+                    title=title or label,
+                    thumb=thumb,
+                )),
+            ))
+        else:
+            parsed.context.append((
+                'Add to Kodi Library (manual)',
+                'RunPlugin({})'.format(plugin.url_for(
+                    add_to_library,
+                    show_id=show_id,
+                    title=title or label,
+                    thumb=thumb,
+                )),
+            ))
+
     if api.logged_in and show_id:
         try:
             in_watchlist = api.is_in_watchlist(show_id)

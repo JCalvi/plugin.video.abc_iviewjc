@@ -1,6 +1,54 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <settings version="1">
   <section id="plugin.video.abc_iviewjc">
+    <category id="library" label="30030">
+      <group id="1">
+        <setting id="library_integration"
+                 type="boolean"
+                 label="30031"
+                 help="30032">
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle"/>
+        </setting>
+        <setting id="library_scope_select"
+                 type="action"
+                 label="30033"
+                 help="30034">
+          <level>0</level>
+          <data>RunScript($CWD/select_library_scope.py)</data>
+          <control type="button" format="action">
+            <close>true</close>
+          </control>
+        </setting>
+        <setting id="library_scope_mode"
+                 type="integer"
+                 label="30033"
+                 help="30034">
+          <level>4</level>
+          <default>1</default>
+          <constraints>
+            <minimum>0</minimum>
+            <step>1</step>
+            <maximum>2</maximum>
+          </constraints>
+          <control type="spinner" format="integer"/>
+        </setting>
+        <setting id="_settings_flush_token"
+                 type="string"
+                 label="30033"
+                 help="30034">
+          <level>4</level>
+          <default/>
+          <constraints>
+            <allowempty>true</allowempty>
+          </constraints>
+          <control type="edit" format="string">
+            <heading>30033</heading>
+          </control>
+        </setting>
+      </group>
+    </category>
     <category id="diagnostics" label="30020">
       <group id="1">
         <setting id="diagnostic_logging"

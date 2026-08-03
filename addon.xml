@@ -2,7 +2,7 @@
 <addon id="plugin.video.abc_iviewjc"
        name="ABC iView"
        provider-name="JCalvi"
-       version="1.1.5">
+       version="2.0.5">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -15,9 +15,59 @@
 
   <extension point="xbmc.addon.metadata">
     <summary lang="en_GB">ABC iview for Kodi with ABC Account support</summary>
-    <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes live ABC channels, QR-code device linking, My Watchlist and Continue Watching.</description>
+    <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes ABC Account synchronisation and configurable Kodi TV library integration for manually selected, watched or watchlisted shows.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>1.1.5
+    <news>2.0.5
+- Replaces the unreliable native scope list with an explicit three-option selector
+- Writes the selected mode with Kodi's modern getSettings().setInt() API
+- Forces a settings-file commit through a changing hidden legacy flush token
+- Verifies the value through a fresh Settings object and the on-disk profile settings.xml before reporting success
+- Restores Manual selection only, currently available watched episode, and My Watchlist only modes
+- Requests immediate library requalification and pruning after a successful change
+
+2.0.4
+- Restores Manual selection only as a library mode
+- Adds Add to/Remove from Kodi Library manual context-menu actions on shows
+- Replaces the non-persistent string list with Kodi's supported integer-backed labelled list
+- Uses a new setting id so invalid 2.0.3 values cannot carry forward
+- Keeps Shows with a currently available watched episode as the default
+
+2.0.3
+- Fixes the Shows to include setting so the selected value persists after closing settings
+- Stores the selection as a stable string value and reads it directly from Kodi
+- Adds My Watchlist only as a working library qualification mode
+- Changing mode triggers an automatic prune and rescan
+- Watchlist add/remove actions trigger prompt library reconciliation
+
+2.0.2
+- A show now qualifies only when a watched episode is still currently available on ABC iView
+- Expired historical watched episodes no longer import otherwise unwatched current shows
+- Existing shows qualified only by expired history are pruned automatically after upgrade
+- Temporary catalogue failures preserve an existing show until the next qualification pass
+
+2.0.1
+- Library Integration is enabled by default
+- Keeps the SlyGuy CommonSettings implementation
+- Imports a show only when at least one episode has playcount/watched state
+- Starting or partially watching an episode no longer imports a new show
+- Once qualified, imports all currently available episodes and seasons for that show
+- Removes generated shows that have no watched episodes
+- Runs a directory-scoped Kodi library clean after pruning stale generated shows
+- Preserves local Kodi watched shows while ABC history catches up
+
+2.0.0
+- Adds optional Kodi TV Library Integration
+- A show becomes followed when any episode is started or marked watched
+- Imports every currently available season and episode for followed shows
+- Keeps previously imported watched episodes as continuity anchors when they expire
+- Adds new seasons and episodes automatically during periodic refreshes
+- Uses STRM and local NFO files so library items launch the ABC iView add-on
+- Synchronises Kodi library watched, unwatched and resume states with ABC
+- Imports existing linked-account viewing history when Library Integration is enabled
+- Adds automatic local Kodi source configuration with scoped library scans
+- Retains targeted diagnostics under IVIEW200LIB
+
+1.1.5
 - Production release of the watched-state race fix from 1.1.4.2
 - Keeps Kodi's selected episode state authoritative while iView catches up
 - Adds an optional targeted diagnostic logging setting
