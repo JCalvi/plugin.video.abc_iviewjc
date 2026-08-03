@@ -23,8 +23,7 @@
         </setting>
         <setting id="library_scope_mode"
                  type="integer"
-                 label="30033"
-                 help="30034">
+                 visible="false">
           <level>4</level>
           <default>1</default>
           <constraints>
@@ -36,16 +35,13 @@
         </setting>
         <setting id="_settings_flush_token"
                  type="string"
-                 label="30033"
-                 help="30034">
+                 visible="false">
           <level>4</level>
           <default/>
           <constraints>
             <allowempty>true</allowempty>
           </constraints>
-          <control type="edit" format="string">
-            <heading>30033</heading>
-          </control>
+          <control type="edit" format="string"/>
         </setting>
       </group>
     </category>

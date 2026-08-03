@@ -1,7 +1,7 @@
+import xbmc
 import xbmcaddon
 import xbmcgui
 
-from resources.lib.libraryintegration import request_library_action
 from resources.lib.librarysettings import (
     ADDON_ID,
     SCOPE_BY_INDEX,
@@ -13,6 +13,22 @@ from resources.lib.librarysettings import (
 def _label(addon, string_id, fallback):
     value = addon.getLocalizedString(string_id)
     return value or fallback
+
+
+def _request_library_scope_change(stored):
+    try:
+        from resources.lib.libraryintegration import request_library_action
+
+        request_library_action(
+            'library_scope_changed',
+            index=stored,
+            scope=SCOPE_BY_INDEX[stored],
+        )
+    except Exception as exc:
+        xbmc.log(
+            'ABC iView could not queue library scope refresh: {}'.format(exc),
+            xbmc.LOGWARNING,
+        )
 
 
 def main():
@@ -45,11 +61,7 @@ def main():
         )
         return
 
-    request_library_action(
-        'library_scope_changed',
-        index=stored,
-        scope=SCOPE_BY_INDEX[stored],
-    )
+    _request_library_scope_change(stored)
     xbmcgui.Dialog().notification(
         'ABC iView',
         'Library mode saved: {}'.format(labels[stored]),

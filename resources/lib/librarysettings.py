@@ -1,5 +1,4 @@
 import os
-import time
 import xml.etree.ElementTree as ET
 
 import xbmc
@@ -11,7 +10,6 @@ from slyguy import log
 
 ADDON_ID = 'plugin.video.abc_iviewjc'
 SETTING_ID = 'library_scope_mode'
-FLUSH_SETTING_ID = '_settings_flush_token'
 DEFAULT_INDEX = 1
 
 SCOPE_MANUAL = 'manual'
@@ -81,13 +79,44 @@ def _disk_scope_index():
     return None
 
 
+def _write_disk_setting(setting_id, value):
+    path = _settings_file()
+    directory = os.path.dirname(path)
+    if directory and not xbmcvfs.exists(directory):
+        xbmcvfs.mkdirs(directory)
+
+    root = ET.Element('settings')
+    if os.path.isfile(path):
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError):
+            root = ET.Element('settings')
+
+    node = None
+    for candidate in root.iter('setting'):
+        if candidate.get('id') == setting_id:
+            node = candidate
+            break
+
+    if node is None:
+        node = ET.SubElement(root, 'setting', id=setting_id)
+
+    if 'value' in node.attrib:
+        del node.attrib['value']
+    node.text = str(value)
+
+    tree = ET.ElementTree(root)
+    temp_path = path + '.tmp'
+    tree.write(temp_path, encoding='utf-8', xml_declaration=True)
+    os.replace(temp_path, path)
+
+
 def set_scope_index(value):
     """Write, force a disk flush, and verify the selected library scope.
 
-    The actual setting write uses the Kodi 20+ Settings class. A changing,
-    hidden legacy string setting is then written solely to force Kodi's add-on
-    settings buffer to disk. Success is reported only after both a fresh
-    Settings object and profile/settings.xml contain the requested value.
+    The actual setting write uses Kodi's Settings class. If Kodi keeps the
+    write in memory longer than expected, the add-on profile settings file is
+    updated directly so the saved mode survives a restart.
     """
     value = _normalise_index(value)
 
@@ -97,16 +126,9 @@ def set_scope_index(value):
     if written is False:
         raise RuntimeError('Kodi rejected the library mode setting write')
 
-    # An unchanged empty dummy value may be optimised away, so use a changing
-    # token to guarantee that the legacy writer has something to commit.
-    flush_token = str(int(time.time() * 1000000))
-    flushed = addon.setSettingString(FLUSH_SETTING_ID, flush_token)
-    if flushed is False:
-        raise RuntimeError('Kodi rejected the settings flush write')
-
     memory_value = None
     disk_value = None
-    for _attempt in range(50):
+    for _attempt in range(20):
         try:
             fresh = xbmcaddon.Addon(ADDON_ID).getSettings()
             memory_value = _normalise_index(fresh.getInt(SETTING_ID))
@@ -121,6 +143,15 @@ def set_scope_index(value):
             )
             return value
         xbmc.sleep(100)
+
+    _write_disk_setting(SETTING_ID, value)
+    disk_value = _disk_scope_index()
+    if disk_value == value:
+        log.info(
+            'ABC iView library mode saved after explicit disk persist: '
+            'index={} scope={}'.format(value, SCOPE_BY_INDEX[value])
+        )
+        return value
 
     raise RuntimeError(
         'Library mode was not committed (requested {}, memory {}, disk {})'
