@@ -1,3 +1,12 @@
+2.1.1
+- Fixed the settings-window selector crash caused by importing SlyGuy without an add-on context
+- The scope selector is now self-contained and always opens xbmcaddon.Addon with the explicit add-on ID
+- The selector keeps the settings window open, preventing pending toggle changes from being discarded
+- Scope writes use getSettings().setInt(), a changing legacy flush token, fresh-memory verification, and disk verification
+- Library Integration is read directly from Kodi's Settings object
+- Native settings changes are picked up and logged immediately by the running service
+- Version is newer than the previously installed 2.1.0 to avoid a downgrade
+
 2.0.5
 - Replaced the unreliable native library-scope list with an explicit three-option selector
 - Saves with xbmcaddon.Addon().getSettings().setInt()

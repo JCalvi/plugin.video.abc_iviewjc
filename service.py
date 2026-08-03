@@ -15,6 +15,8 @@ from resources.lib.diagnostics import (
 )
 from resources.lib.libraryintegration import (
     LibraryIntegration,
+    library_enabled,
+    library_scope,
     request_episode_state,
     request_follow_show,
     request_reconcile_show,
@@ -244,6 +246,28 @@ class ABCMonitor(xbmc.Monitor):
             poll_interval=CONTEXT_POLL_INTERVAL,
             gui=raw_gui_state(),
         )
+
+    def onSettingsChanged(self):
+        """Apply native settings-dialog changes without restarting Kodi."""
+        try:
+            enabled = library_enabled()
+            scope = library_scope()
+            xbmc.log(
+                'plugin.video.abc_iviewjc - Settings saved: '
+                'library_integration={} library_scope={}'.format(
+                    enabled,
+                    scope,
+                ),
+                xbmc.LOGINFO,
+            )
+            # The service loop will re-read both values on its next tick.
+            self.library._next_tick = 0
+        except Exception as exc:
+            xbmc.log(
+                'plugin.video.abc_iviewjc - Settings change handling failed: '
+                '{}'.format(exc),
+                xbmc.LOGERROR,
+            )
 
     def onNotification(self, sender, method, data):
         self.library.handle_notification(method, data)

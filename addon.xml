@@ -2,7 +2,7 @@
 <addon id="plugin.video.abc_iviewjc"
        name="ABC iView"
        provider-name="JCalvi"
-       version="2.0.5">
+       version="2.1.1">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -17,7 +17,16 @@
     <summary lang="en_GB">ABC iview for Kodi with ABC Account support</summary>
     <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes ABC Account synchronisation and configurable Kodi TV library integration for manually selected, watched or watchlisted shows.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>2.0.5
+    <news>2.1.1
+- Fixes Shows to include crashing when launched from the settings window
+- The selector no longer imports SlyGuy or the full library service without an add-on execution context
+- Keeps the settings window open while selecting a scope, so unsaved toggle changes are not discarded
+- Saves scope with Addon.getSettings().setInt(), forces a legacy flush, and verifies memory and settings.xml
+- Reads Library Integration directly through Kodi's Settings object
+- Applies and logs native settings changes immediately without restarting Kodi
+- Uses a version newer than the previously installed 2.1.0 so Kodi is not being downgraded
+
+2.0.5
 - Replaces the unreliable native scope list with an explicit three-option selector
 - Writes the selected mode with Kodi's modern getSettings().setInt() API
 - Forces a settings-file commit through a changing hidden legacy flush token

@@ -34,6 +34,7 @@ from .librarysettings import (
     SCOPE_MANUAL as LIBRARY_SCOPE_MANUAL,
     SCOPE_WATCHED as LIBRARY_SCOPE_WATCHED,
     SCOPE_WATCHLIST as LIBRARY_SCOPE_WATCHLIST,
+    get_library_enabled,
     get_scope as library_scope,
     get_scope_index as library_scope_index,
     set_scope_index as set_library_scope_index,
@@ -58,10 +59,9 @@ MAX_REQUESTS = 200
 STATE_VERSION = 6
 
 def library_enabled():
-    try:
-        return bool(settings.getBool('library_integration', True))
-    except Exception:
-        return False
+    # Read this directly from Kodi rather than through a long-lived wrapper,
+    # so reopening Settings and pressing OK is reflected immediately.
+    return get_library_enabled()
 
 
 def _property_json(name, default):

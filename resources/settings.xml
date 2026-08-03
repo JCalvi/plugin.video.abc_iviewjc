@@ -18,7 +18,7 @@
           <level>0</level>
           <data>RunScript($CWD/select_library_scope.py)</data>
           <control type="button" format="action">
-            <close>true</close>
+            <close>false</close>
           </control>
         </setting>
         <setting id="library_scope_mode"

@@ -6,11 +6,9 @@ import xbmc
 import xbmcaddon
 import xbmcvfs
 
-from slyguy import log
-
-
 ADDON_ID = 'plugin.video.abc_iviewjc'
 SETTING_ID = 'library_scope_mode'
+ENABLED_SETTING_ID = 'library_integration'
 FLUSH_SETTING_ID = '_settings_flush_token'
 DEFAULT_INDEX = 1
 
@@ -39,12 +37,27 @@ def get_scope_index():
         manager = addon.getSettings()
         return _normalise_index(manager.getInt(SETTING_ID))
     except Exception as exc:
-        log.warning(
-            'ABC iView could not read the saved library mode; using watched '
-            'default: {}'.format(exc)
+        xbmc.log(
+            'plugin.video.abc_iviewjc - Could not read the saved library mode; '
+            'using watched default: {}'.format(exc),
+            xbmc.LOGWARNING,
         )
         return DEFAULT_INDEX
 
+
+
+def get_library_enabled():
+    """Read the Library Integration toggle from Kodi's current Settings API."""
+    try:
+        addon = xbmcaddon.Addon(ADDON_ID)
+        return bool(addon.getSettings().getBool(ENABLED_SETTING_ID))
+    except Exception as exc:
+        xbmc.log(
+            'plugin.video.abc_iviewjc - Could not read Library Integration; '
+            'using enabled default: {}'.format(exc),
+            xbmc.LOGWARNING,
+        )
+        return True
 
 def get_scope():
     return SCOPE_BY_INDEX.get(get_scope_index(), SCOPE_WATCHED)
@@ -115,9 +128,10 @@ def set_scope_index(value):
 
         disk_value = _disk_scope_index()
         if memory_value == value and disk_value == value:
-            log.info(
-                'ABC iView library mode saved and verified: index={} scope={}'
-                .format(value, SCOPE_BY_INDEX[value])
+            xbmc.log(
+                'plugin.video.abc_iviewjc - Library mode saved and verified: '
+                'index={} scope={}'.format(value, SCOPE_BY_INDEX[value]),
+                xbmc.LOGINFO,
             )
             return value
         xbmc.sleep(100)
