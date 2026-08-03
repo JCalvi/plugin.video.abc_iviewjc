@@ -1,19 +1,49 @@
 import re
 
+import xbmc
+import xbmcgui
+
 from slyguy import plugin, gui, signals, monitor, inputstream, log
 from slyguy.constants import ROUTE_LIVE_TAG
 
 from .api import API
 from .language import _
 from .settings import settings
+from .diagnostics import diagnostic_event
+from .watchaction import (
+    apply_pending_state,
+    consume_context_refresh,
+    current_folder_url,
+)
 
 api = API()
 
 
 @signals.on(signals.BEFORE_DISPATCH)
 def before_dispatch():
+    diagnostic_event('IVIEW115LIST', 'before_dispatch_begin')
+
+    # Kodi's built-in watched action automatically rebuilds this folder. Use
+    # that rebuild itself as the reliable signal, before stale iView history
+    # can recreate the selected item with its old playcount.
+    action = consume_context_refresh(
+        current_folder_url()
+    )
+    if action:
+        diagnostic_event(
+            'IVIEW115FIX',
+            'dispatch_action',
+            house_number=action['item']['house_number'],
+            playcount=action['playcount'],
+        )
+
     api.new_session()
     plugin.logged_in = api.logged_in
+    diagnostic_event(
+        'IVIEW115LIST',
+        'before_dispatch_complete',
+        logged_in=api.logged_in,
+    )
 
 
 @plugin.route('')
@@ -131,6 +161,38 @@ def remove_watchlist(show_id, title='', thumb='', **kwargs):
         heading=title or 'ABC iView',
         icon=thumb or None,
     )
+    gui.refresh()
+
+
+@plugin.route()
+@plugin.login_required()
+def mark_watched(show_id, house_number, duration=0, title='', thumb='', **kwargs):
+    try:
+        try:
+            progress = int(float(duration or 0))
+        except Exception:
+            progress = 0
+        api.mark_video_watched(show_id, house_number, progress=progress)
+    except Exception as exc:
+        log.exception('Unable to mark {} watched: {}'.format(house_number, exc))
+        gui.notification('Unable to mark watched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
+        return
+
+    gui.notification('Marked watched on ABC iview', heading=title or 'ABC iView', icon=thumb or None)
+    gui.refresh()
+
+
+@plugin.route()
+@plugin.login_required()
+def mark_unwatched(show_id, house_number, title='', thumb='', **kwargs):
+    try:
+        api.mark_video_unwatched(show_id, house_number)
+    except Exception as exc:
+        log.exception('Unable to mark {} unwatched: {}'.format(house_number, exc))
+        gui.notification('Unable to mark unwatched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
+        return
+
+    gui.notification('Marked unwatched on ABC iview', heading=title or 'ABC iView', icon=thumb or None)
     gui.refresh()
 
 
@@ -282,6 +344,20 @@ def play(url, house_number='', **kwargs):
         gui.notification('Stream not found')
         return
     item = plugin.Item(path=stream_url, inputstream=inputstream.HLS(live=is_live))
+
+    # Share the active ABC episode details with the background playback
+    # service. Kodi window properties are process-safe and remain available
+    # after this plugin route has returned the resolved stream.
+    window = xbmcgui.Window(10000)
+    if is_live or not api.logged_in:
+        for key in ('show_id', 'house_number', 'duration', 'title'):
+            window.clearProperty('abc_iview.{}'.format(key))
+    else:
+        show_id = _show_id(data)
+        window.setProperty('abc_iview.show_id', str(show_id or ''))
+        window.setProperty('abc_iview.house_number', str(hn or ''))
+        window.setProperty('abc_iview.duration', str(data.get('duration') or ''))
+        window.setProperty('abc_iview.title', str(data.get('episodeTitle') or data.get('title') or ''))
     for playlist in data.get('_embedded', {}).get('playlist', []):
         if playlist.get('type') in ('program', 'livestream'):
             captions = playlist.get('captions', {}).get('src-vtt')
@@ -435,12 +511,65 @@ def _parse_video(item, fanart=None):
         href = '/video/{}'.format(hn)
     if not href:
         return None
+
     season, episode = _parse_season_episode(subtitle)
-    return plugin.Item(label=_episode_label(title, subtitle) or hn or 'ABC iview episode', info={
-        'plot': item.get('description', ''), 'tvshowtitle': title, 'season': season,
-        'episode': episode, 'duration': item.get('duration'), 'mpaa': item.get('classification', ''),
-        'mediatype': 'episode'}, art={'thumb': _thumb(item), 'fanart': fanart or _thumb(item)},
-        path=plugin.url_for(play, url=href, house_number=hn), playable=True)
+    info = {
+        'plot': item.get('description', ''),
+        'tvshowtitle': title,
+        'season': season,
+        'episode': episode,
+        'duration': item.get('duration'),
+        'mpaa': item.get('classification', ''),
+        'mediatype': 'episode',
+    }
+
+    state = {}
+    if api.logged_in and hn:
+        try:
+            state = api.get_history_state(hn)
+        except Exception as exc:
+            log.warning('Unable to obtain watched state for {}: {}'.format(hn, exc))
+
+    server_state = dict(state or {})
+    state = apply_pending_state(hn, state)
+
+    # Always assign the exact playcount. This is essential when a local
+    # unwatched value must temporarily override stale server done=True.
+    info['playcount'] = 1 if state.get('done') else 0
+
+    diagnostic_event(
+        'IVIEW115LIST',
+        'episode_state',
+        house_number=hn,
+        title=_episode_label(title, subtitle),
+        server_state=server_state,
+        final_state=state,
+        assigned_playcount=info['playcount'],
+    )
+
+    show_id = _show_id(item)
+    parsed = plugin.Item(
+        label=_episode_label(title, subtitle) or hn or 'ABC iview episode',
+        info=info,
+        art={'thumb': _thumb(item), 'fanart': fanart or _thumb(item)},
+        # Keep the ABC identifiers on the playable plugin URL. The background
+        # service uses these values when Kodi's built-in Mark watched /
+        # Mark unwatched action changes the selected ListItem playcount.
+        path=plugin.url_for(
+            play,
+            url=href,
+            house_number=hn,
+            show_id=show_id or '',
+            duration=item.get('duration') or 0,
+        ),
+        playable=True,
+    )
+
+    progress = int(state.get('progress') or item.get('_resume') or 0)
+    if progress and not state.get('done'):
+        parsed.resume_from = progress
+
+    return parsed
 
 
 def _show_id(item):

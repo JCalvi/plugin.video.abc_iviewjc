@@ -12,6 +12,7 @@ be installed alongside the older aussieaddons `plugin.video.abc_iview` add-on.
 - Link an ABC Account using the television QR-code/device-code flow
 - My Watchlist
 - Continue Watching
+- Two-way watched-status and resume-progress sync
 - Search
 - HLS playback and WebVTT subtitles where supplied by ABC
 - Optional Kodi bookmarks through the SlyGuy framework

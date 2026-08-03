@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="1">
+  <section id="plugin.video.abc_iviewjc">
+    <category id="diagnostics" label="30020">
+      <group id="1">
+        <setting id="diagnostic_logging"
+                 type="boolean"
+                 label="30021"
+                 help="30022">
+          <level>0</level>
+          <default>false</default>
+          <control type="toggle"/>
+        </setting>
+      </group>
+    </category>
+  </section>
+</settings>

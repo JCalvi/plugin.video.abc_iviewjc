@@ -2,7 +2,7 @@
 <addon id="plugin.video.abc_iviewjc"
        name="ABC iView"
        provider-name="JCalvi"
-       version="1.0.2">
+       version="1.1.5">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -11,11 +11,58 @@
     <provides>video</provides>
   </extension>
 
+  <extension point="xbmc.service" library="service.py" start="login"/>
+
   <extension point="xbmc.addon.metadata">
     <summary lang="en_GB">ABC iview for Kodi with ABC Account support</summary>
     <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes live ABC channels, QR-code device linking, My Watchlist and Continue Watching.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>1.0.2
+    <news>1.1.5
+- Production release of the watched-state race fix from 1.1.4.2
+- Keeps Kodi's selected episode state authoritative while iView catches up
+- Adds an optional targeted diagnostic logging setting
+- Diagnostics also activate automatically with Kodi global debug logging
+- Redacts account credentials from diagnostic output
+- Suppresses duplicate writes when two detectors catch the same action
+- Retains single-episode queued writes and retry protection
+
+1.1.4.2
+- Fixes the race where Kodi's automatic folder rebuild restored stale iView state
+- Captures the selected episode and baseline while the context menu is open
+- Uses the post-toggle folder rebuild as the reliable watched-action signal
+- Keeps Kodi's local playcount authoritative until iView reports the same state
+- Queues only the selected episode and retries failed iView writes
+- Never scans or changes an entire season
+- Never refreshes Kodi after a watched-state write failure
+
+1.1.4.1 diagnostic
+- Exact 1.1.4 behaviour with diagnostic logging only
+- Logs service invocation, Kodi OnUpdate payloads, selected playcount, 1.1.4 inference decisions, ABC history reads and ABC writes
+
+1.1.4
+- Fixed Kodi Mark unwatched syncing when the selected plugin item briefly disappears
+- Uses VideoLibrary.OnUpdate playcount and a short selected-item grace period
+
+1.1.3
+- Kodi's built-in Mark watched and Mark unwatched actions now sync to ABC iview
+- Removed the duplicate ABC-specific watched context actions
+- ABC episode identifiers are retained on playable item URLs for watched syncing
+
+1.1.2
+- Fixed ABC watched and progress writes to use the current PATCH history API
+- Added the required history query values, including done state
+- Renamed ABC sync context actions to distinguish them from Kodi-only actions
+
+1.1.1
+- Fixed ABC account token renewal after access-token expiry
+- Authenticated ABC requests now retry once after HTTP 401
+
+1.1.0
+- Added two-way watched-status and resume-progress sync with ABC accounts
+- Added Mark watched and Mark unwatched episode context-menu actions
+- Episodes watched on ABC are displayed as watched in Kodi
+
+1.0.2
 - Added Add to My Watchlist and Remove from My Watchlist context-menu actions
 - Added five-minute watchlist-state caching with immediate refresh after changes
 - Uses the current authenticated ABC Seesaw watchlist API

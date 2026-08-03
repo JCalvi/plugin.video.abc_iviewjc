@@ -1,3 +1,50 @@
+1.1.5
+- Production release of the 1.1.4.2 watched-state race fix
+- Optional targeted diagnostic logging under Add-on Settings > Diagnostics
+- Kodi global debug logging also enables add-on diagnostics automatically
+- Diagnostic output redacts access tokens, refresh tokens and signatures
+- Duplicate same-episode/same-state writes within three seconds are suppressed
+- Normal operation logs only sync results, warnings and errors
+
+1.1.4.2
+- Fixed the proven Kodi folder-rebuild/playcount race
+- Context candidate is captured before Kodi changes the item
+- Automatic post-toggle folder refresh consumes exactly that candidate
+- Pending local playcount overrides stale iView history until confirmation
+- Background single-episode write queue with retry
+- No whole-season scanning and no failure refresh
+
+1.1.4.1 diagnostic
+- Exact 1.1.4 logic; logging only
+- Diagnostic prefixes: IVIEW114DIAG, IVIEW114API, IVIEW114LIST
+
+1.1.4
+- Fixed Kodi built-in Mark unwatched not reaching ABC iview.
+- Uses Kodi's VideoLibrary.OnUpdate playcount notification for watched changes.
+- Retains the last selected ABC episode briefly while Kodi closes the context menu.
+- Keeps the normal single Kodi Mark watched / Mark unwatched action.
+
+1.1.3
+- Kodi's built-in Mark watched and Mark unwatched actions now sync to ABC iview.
+- Removed the duplicate ABC-specific watched context-menu actions.
+- Added background detection of watched playcount changes on ABC plugin items.
+- Retains the 1.1.2 PATCH history API implementation and 1.1.1 token renewal fix.
+
+1.1.2
+- Fixed watched and playback-progress writes to use ABC's current PATCH history API.
+- Added the required slug and done query values used by the current ABC TV app.
+- Mark unwatched now resets only the selected episode instead of using a show-level deletion.
+- Renamed the ABC account context actions so they are distinct from Kodi's local watched actions.
+
+1.1.1
+- Fixed ABC account token renewal after access-token expiry
+- Authenticated ABC requests now retry once after HTTP 401
+
+Version 1.1.0
+- Added two-way watched-status and resume-progress sync with ABC accounts.
+- Added Mark watched and Mark unwatched episode context-menu actions.
+- Episodes watched on ABC are displayed as watched in Kodi.
+
 1.0.2 - 2026-07-31
 - Added Add to My Watchlist and Remove from My Watchlist context-menu actions.
 - Added five-minute watchlist-state caching while browsing.

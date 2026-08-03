@@ -12,6 +12,7 @@ from .constants import (
     SECRET, DRM_AUTH_CLIENT_ID, HEADERS,
 )
 from .language import _
+from .diagnostics import diagnostic_event, redact
 
 
 PROFILE_API = 'https://mylogin-api.abc.net.au/latest'
@@ -25,12 +26,28 @@ class APIError(Error):
 
 
 class API(object):
+    def _diag(self, event, **fields):
+        diagnostic_event(
+            'IVIEW115API',
+            event,
+            **fields
+        )
+
     def new_session(self):
+        self._diag(
+            'new_session_begin',
+            has_uid=bool(userdata.get('uid')),
+            has_access_token=bool(userdata.get('access_token')),
+            token_expires=userdata.get('token_expires'),
+        )
         self.logged_in = False
         self._session = Session(HEADERS)
         self._set_authentication()
+        self._history = None
+        self._history_expires = 0
 
         if self.logged_in:
+            self._diag('new_session_existing_token', logged_in=True)
             return
 
         # A linked TV can be restored from its persistent deviceId. The
@@ -45,7 +62,12 @@ class API(object):
                     userdata.set('uid', uid)
 
             if uid:
+                self._diag('new_session_refresh_token_begin', has_uid=True)
                 self._get_seesaw_token(uid)
+                self._diag(
+                    'new_session_refresh_token_complete',
+                    logged_in=self.logged_in,
+                )
         except Exception as exc:
             log.warning('Unable to restore ABC account session: {}'.format(exc))
 
@@ -160,7 +182,7 @@ class API(object):
         qr_image = info.get('qrCodeImageUrl') or info.get('qrCodeUrl')
 
         if not code:
-            log.error('ABC ctv/link response: {}'.format(data))
+            log.error('ABC ctv/link response: {}'.format(redact(data)))
             raise APIError('ABC did not return a TV linking code')
 
         userdata.set('pending_device_id', returned_device_id)
@@ -245,13 +267,22 @@ class API(object):
             'source': 'iview',
         }
 
-        response = self._session.get(SEESAW_URL + '/v2/token', params=params)
+        # The token endpoint must be called without an existing bearer token.
+        # Leaving an expired Authorization header attached causes ABC to return
+        # HTTP 401 instead of issuing a fresh access token.
+        authorization = self._session.headers.pop('Authorization', None)
+        try:
+            response = self._session.get(SEESAW_URL + '/v2/token', params=params)
+        finally:
+            if authorization:
+                self._session.headers['Authorization'] = authorization
+
         token_data = self._json(response, 'ABC account token')
         auth = token_data.get('auth') or token_data
 
         access_token = auth.get('access_token') or auth.get('accessToken')
         if not access_token:
-            log.error('ABC Seesaw token response: {}'.format(token_data))
+            log.error('ABC Seesaw token response: {}'.format(redact(token_data)))
             raise APIError('ABC did not return an account access token')
 
         expiry = auth.get('expiry') or auth.get('expires_at')
@@ -282,6 +313,17 @@ class API(object):
 
         self._get_seesaw_token(uid)
         return True
+
+    def _seesaw_request(self, method, url, action, **kwargs):
+        """Make an authenticated Seesaw request and retry once on HTTP 401."""
+        self._refresh_token()
+        response = getattr(self._session, method)(url, **kwargs)
+
+        if getattr(response, 'status_code', 200) == 401:
+            self._refresh_token(force=True)
+            response = getattr(self._session, method)(url, **kwargs)
+
+        return self._json(response, action)
 
     def get_categories(self):
         data = self._session.get(API_BASE_URL + '/v2/navigation/mobile').json()
@@ -317,12 +359,11 @@ class API(object):
         return []
 
     def _get_watchlist_entries(self):
-        self._refresh_token()
         uid = userdata.get('uid')
-        response = self._session.get(SEESAW_URL + '/v1/saved/watchlist/show', params={
-            'source': 'iview', 'slug': 'watchlist', 'raw': 1, 'done': 0, 'UID': uid,
-        })
-        data = self._json(response, 'ABC watchlist')
+        data = self._seesaw_request('get', SEESAW_URL + '/v1/saved/watchlist/show',
+            'ABC watchlist', params={
+                'source': 'iview', 'slug': 'watchlist', 'raw': 1, 'done': 0, 'UID': uid,
+            })
         return data.get('data', []) if isinstance(data, dict) else []
 
     def _cache_watchlist_ids(self, ids):
@@ -365,20 +406,17 @@ class API(object):
         )
 
     def _change_watchlist(self, show_id, add):
-        self._refresh_token()
         uid = userdata.get('uid')
         show_id = str(show_id)
         url = SEESAW_URL + '/v2/saved/watchlist/show/{}'.format(show_id)
         params = {'UID': uid, 'source': 'iview', 'raw': 1}
 
         if add:
-            response = self._session.post(url, params=params, json={})
-            action = 'Add to ABC watchlist'
+            data = self._seesaw_request('post', url, 'Add to ABC watchlist',
+                params=params, json={})
         else:
-            response = self._session.delete(url, params=params, json={})
-            action = 'Remove from ABC watchlist'
-
-        data = self._json(response, action)
+            data = self._seesaw_request('delete', url, 'Remove from ABC watchlist',
+                params=params, json={})
 
         # Keep an existing in-memory cache accurate. If it has not yet been
         # loaded, leave it unset so the next listing obtains the complete set.
@@ -398,13 +436,198 @@ class API(object):
     def remove_from_watchlist(self, show_id):
         return self._change_watchlist(show_id, False)
 
-    def get_continue_watching(self):
+
+    def clear_history_cache(self):
+        self._history = None
+        self._history_expires = 0
+
+    def _load_history(self, force=False):
+        self._diag(
+            'history_load_enter',
+            force=force,
+            logged_in=self.logged_in,
+            cache_present=self._history is not None,
+            cache_expires_in=(
+                self._history_expires - time.time()
+                if self._history is not None
+                else None
+            ),
+        )
+        if not self.logged_in:
+            self._diag('history_load_not_logged_in')
+            return {}
+
+        if not force and self._history is not None and self._history_expires > time.time():
+            self._diag(
+                'history_cache_hit',
+                count=len(self._history),
+                done_count=sum(
+                    1 for value in self._history.values()
+                    if value.get('done')
+                ),
+            )
+            return dict(self._history)
+
         self._refresh_token()
         uid = userdata.get('uid')
-        history = self._session.get(SEESAW_URL + '/v1/history/video/recent', params={
-            'source': 'iview', 'slug': 'watchlist', 'raw': 1, 'limit': 20,
-            'done': 0, 'UID': uid,
-        }).json().get('data', [])
+        history = {}
+
+        # Seesaw separates completed and incomplete history. Fetch both so
+        # catalogue listings can display ABC's watched and resume state.
+        for done in (0, 1):
+            self._diag('history_fetch_begin', done=done)
+            data = self._seesaw_request('get', SEESAW_URL + '/v1/history/video/recent',
+                'ABC viewing history', params={
+                    'source': 'iview', 'slug': 'watchlist', 'raw': 1,
+                    'limit': 500, 'done': done, 'UID': uid,
+                })
+            rows = data.get('data', []) if isinstance(data, dict) else []
+            self._diag(
+                'history_fetch_result',
+                done=done,
+                row_count=len(rows),
+                keys=[
+                    str(row.get('key'))
+                    for row in rows
+                    if row.get('key')
+                ],
+            )
+            for row in rows:
+                key = row.get('key')
+                if not key:
+                    continue
+                history[str(key)] = {
+                    'done': bool(done or row.get('done')),
+                    'progress': int(row.get('progress') or 0),
+                }
+
+        self._history = history
+        self._history_expires = time.time() + 300
+        self._diag(
+            'history_load_complete',
+            count=len(history),
+            done_count=sum(
+                1 for value in history.values()
+                if value.get('done')
+            ),
+            done_keys=[
+                key for key, value in history.items()
+                if value.get('done')
+            ],
+        )
+        return dict(history)
+
+    def get_history_state(self, house_number):
+        if not house_number:
+            return {}
+        state = self._load_history().get(str(house_number), {})
+        self._diag(
+            'history_state',
+            house_number=house_number,
+            state=state,
+        )
+        return state
+
+    def _history_request(self, method, url, action, extra_params=None):
+        # These are the same standard query values used by ABC's current TV
+        # application for Seesaw history updates. History writes are PATCH
+        # requests with no JSON body.
+        params = {
+            'UID': userdata.get('uid'),
+            'source': 'iview',
+            'slug': 'watchlist',
+            'raw': 1,
+        }
+        if extra_params:
+            params.update(extra_params)
+        self._diag(
+            'history_write_request',
+            method=method,
+            url=url,
+            action=action,
+            done=params.get('done'),
+        )
+        result = self._seesaw_request(
+            method,
+            url,
+            action,
+            params=params,
+        )
+        self._diag(
+            'history_write_response',
+            method=method,
+            url=url,
+            result=result,
+        )
+        return result
+
+    def set_video_progress(self, show_id, house_number, progress, done=False):
+        if not show_id or not house_number:
+            return False
+
+        progress = max(0, int(progress or 0))
+        self._diag(
+            'set_video_progress',
+            show_id=show_id,
+            house_number=house_number,
+            progress=progress,
+            done=done,
+        )
+        url = SEESAW_URL + '/v2/history/show/{}/video/{}/progress/{}'.format(
+            show_id, house_number, progress
+        )
+        self._history_request(
+            'patch',
+            url,
+            'Update ABC viewing progress',
+            extra_params={'done': '1' if done else '0'},
+        )
+
+        if self._history is not None:
+            self._history[str(house_number)] = {
+                'done': bool(done),
+                'progress': progress,
+            }
+            self._history_expires = time.time() + 300
+        return True
+
+    def mark_video_watched(self, show_id, house_number, progress=0):
+        if not show_id or not house_number:
+            return False
+
+        # ABC's current TV application marks completion through the normal
+        # progress endpoint with done=1, rather than a PUT to the /done path.
+        if not progress and self._history is not None:
+            progress = self._history.get(str(house_number), {}).get('progress') or 0
+        return self.set_video_progress(
+            show_id,
+            house_number,
+            max(1, int(progress or 0)),
+            done=True,
+        )
+
+    def mark_video_unwatched(self, show_id, house_number):
+        if not show_id or not house_number:
+            return False
+
+        # Resetting progress with done=0 changes only this episode and avoids
+        # ABC's show-level history deletion endpoint, which would remove every
+        # episode for the show.
+        return self.set_video_progress(
+            show_id,
+            house_number,
+            0,
+            done=False,
+        )
+
+    def get_continue_watching(self):
+        uid = userdata.get('uid')
+        data = self._seesaw_request('get', SEESAW_URL + '/v1/history/video/recent',
+            'ABC continue watching', params={
+                'source': 'iview', 'slug': 'watchlist', 'raw': 1, 'limit': 20,
+                'done': 0, 'UID': uid,
+            })
+        history = data.get('data', []) if isinstance(data, dict) else []
         items = []
         for row in history:
             key = row.get('key')
@@ -456,5 +679,6 @@ class API(object):
             userdata.delete(key)
 
         self.clear_watchlist_cache()
+        self.clear_history_cache()
         self.logged_in = False
         self._session = Session(HEADERS)
