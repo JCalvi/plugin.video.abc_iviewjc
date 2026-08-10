@@ -31,10 +31,6 @@ be installed alongside the older aussieaddons `plugin.video.abc_iview` add-on.
 3. Select the release ZIP containing the `plugin.video.abc_iviewjc` folder.
 4. Open **ABC iView+** from Video add-ons.
 
-## Upgrade compatibility
-
-ABC iView+ keeps the existing `plugin.video.abc_iviewjc` add-on ID, settings, generated-library paths and `ABC iView Library` media-source name. Upgrading from 2.3.x therefore preserves the current installation and library integration.
-
 ## Account linking
 
 Select **Login** in the add-on. Kodi displays a QR code and linking code.
@@ -67,7 +63,7 @@ their respective owners. Availability and APIs may change without notice.
 
 - Built on the SlyGuy Kodi add-on framework
 - Catalogue and playback behaviour informed by the earlier open-source ABC
-  iview Kodi add-on
+  iview Kodi add-on from Aussie Addons
 - ABC Account support uses the connected-TV device-link workflow exposed by
   ABC's television application services
 
