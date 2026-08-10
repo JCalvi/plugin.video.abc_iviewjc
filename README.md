@@ -89,8 +89,8 @@ Library mode changes are handed to the background service through a durable on-d
 
 ## Service cadence and ToggleWatched
 
-The background service is event-driven: Kodi notifications, playback callbacks, durable request wakes and explicit retry deadlines schedule real work. While idle it performs no library tick and never polls the selected item or Kodi's video database. A low-frequency 60-second disk check is only a safety net for an actual queued request whose immediate wake token was missed. The add-on never calls `Container.Refresh`.
+The background service is event-driven: Kodi notifications, playback callbacks, durable request wakes and explicit retry deadlines schedule real work. While idle it performs no library tick and never polls the selected item or Kodi's video database. A low-frequency 60-second disk check is only a safety net for an actual queued request whose immediate wake token was missed.
 
 Playback progress is written when playback is paused, stopped or completed. A three-minute periodic fallback protects resume progress during long uninterrupted playback if Kodi or the device exits unexpectedly.
 
-Plugin-browser Mark watched, Mark unwatched and `ToggleWatched` use Kodi's own committed plugin-URL playcount followed by Kodi's normal folder reload. The next dispatch compares the previous render manifest with the committed read-only database rows and queues the ABC change. Generated Kodi-library episodes remain on the separate 2.2.5 `VideoLibrary.OnUpdate` path using positive episode IDs; the plugin-browser observer does not participate in library-event handling.
+Plugin-browser Mark watched, Mark unwatched and `ToggleWatched` use Kodi's own committed plugin-URL playcount followed by Kodi's normal folder reload. The next dispatch compares the previous render manifest with the committed read-only database rows and queues the ABC change.
