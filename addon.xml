@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.abc_iviewjc"
-       name="ABC iView"
+       name="ABC iView+"
        provider-name="JCalvi"
-       version="2.1.1">
+       version="2.4.0">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -14,124 +14,51 @@
   <extension point="xbmc.service" library="service.py" start="login"/>
 
   <extension point="xbmc.addon.metadata">
-    <summary lang="en_GB">ABC iview for Kodi with ABC Account support</summary>
-    <description lang="en_GB">Browse and play ABC iview content in Kodi. Includes ABC Account synchronisation and configurable Kodi TV library integration for manually selected, watched or watchlisted shows.</description>
+    <summary lang="en_GB">ABC iView+ for Kodi with ABC Account support</summary>
+    <description lang="en_GB">Browse and play ABC iview content in Kodi with ABC iView+. Includes ABC Account synchronisation and configurable Kodi TV library integration for manually selected, watched or watchlisted shows.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>2.1.1
-- Fixes Shows to include crashing when launched from the settings window
-- The selector no longer imports SlyGuy or the full library service without an add-on execution context
-- Keeps the settings window open while selecting a scope, so unsaved toggle changes are not discarded
-- Saves scope with Addon.getSettings().setInt(), forces a legacy flush, and verifies memory and settings.xml
-- Reads Library Integration directly through Kodi's Settings object
-- Applies and logs native settings changes immediately without restarting Kodi
-- Uses a version newer than the previously installed 2.1.0 so Kodi is not being downgraded
+    <news>2.4.0
+- Renames the add-on display name to ABC iView+ so it is clearly distinguishable from the older Aussie Add-ons ABC iview add-on
+- Changes the lightweight scheduler heartbeat from 0.5 seconds to 1.0 second
+- Retains the same add-on ID, settings, generated library paths and media-source name so existing installations upgrade in place
+- Includes all 2.3.4 event-driven synchronisation, scan-loop prevention and hardening fixes unchanged
 
-2.0.5
-- Replaces the unreliable native scope list with an explicit three-option selector
-- Writes the selected mode with Kodi's modern getSettings().setInt() API
-- Forces a settings-file commit through a changing hidden legacy flush token
-- Verifies the value through a fresh Settings object and the on-disk profile settings.xml before reporting success
-- Restores Manual selection only, currently available watched episode, and My Watchlist only modes
-- Requests immediate library requalification and pruning after a successful change
+2.3.4
+- Makes Kodi's built-in Update library command trigger one delayed ABC iView library reconciliation
+- Prevents external scans, add-on-owned scans and automatic cleanonupdate cleans from forming scan/clean feedback loops
+- Backs off unresolved episode-state writes instead of retrying once per second
+- Keeps the background service alive after transient library tick failures and retries after 30 seconds
+- Adds a 60-second durable-request safety check without restoring iView list polling
+- Tracks clean ownership explicitly and hardens scan/clean startup state against fast Kodi notifications
 
-2.0.4
-- Restores Manual selection only as a library mode
-- Adds Add to/Remove from Kodi Library manual context-menu actions on shows
-- Replaces the non-persistent string list with Kodi's supported integer-backed labelled list
-- Uses a new setting id so invalid 2.0.3 values cannot carry forward
-- Keeps Shows with a currently available watched episode as the default
+2.3.3
+- Prevents recursive scan-clean-scan loops when Kodi cleanonupdate is enabled
+- Ignores scan-start notifications and add-on-owned scan-finished notifications as scheduling triggers
+- Preserves pending Kodi watched updates when unrelated library work runs
+- Retains all polling-free list-view and watched/resume fixes from 2.3.2
 
-2.0.3
-- Fixes the Shows to include setting so the selected value persists after closing settings
-- Stores the selection as a stable string value and reads it directly from Kodi
-- Adds My Watchlist only as a working library qualification mode
-- Changing mode triggers an automatic prune and rescan
-- Watchlist add/remove actions trigger prompt library reconciliation
+2.3.2
+- Restores Kodi-library watched and unwatched writes to ABC using a dedicated three-second event queue
+- Prevents far-future library maintenance deadlines from delaying Kodi watched changes
+- Retries briefly when Kodi emits OnUpdate before the episode row is fully readable
+- Retains the polling-free iView list view and completed-without-resume display fixes from 2.3.1
 
-2.0.2
-- A show now qualifies only when a watched episode is still currently available on ABC iView
-- Expired historical watched episodes no longer import otherwise unwatched current shows
-- Existing shows qualified only by expired history are pruned automatically after upgrade
-- Temporary catalogue failures preserve an existing show until the next qualification pass
+2.3.1
+- Removes constant library and action-queue polling while Kodi is idle or browsing iView
+- Uses event-driven, debounced Kodi/ABC library synchronisation with scheduled retries
+- Makes manual Apply settings and reconcile now wake the service immediately
+- Refreshes ABC history per folder render so recent watched changes display immediately
+- Shows completed episodes as watched with no resume point and prevents stale Kodi plugin rows overriding ABC state
 
-2.0.1
-- Library Integration is enabled by default
-- Keeps the SlyGuy CommonSettings implementation
-- Imports a show only when at least one episode has playcount/watched state
-- Starting or partially watching an episode no longer imports a new show
-- Once qualified, imports all currently available episodes and seasons for that show
-- Removes generated shows that have no watched episodes
-- Runs a directory-scoped Kodi library clean after pruning stale generated shows
-- Preserves local Kodi watched shows while ABC history catches up
+2.3.0
+- Promotes the proven 2.2.10 watched-state behaviour to the 2.3 release line
+- Uses unique same-directory temporary files for atomic generated library writes
+- Adds regression coverage for watched and library synchronisation paths
 
 2.0.0
-- Adds optional Kodi TV Library Integration
-- A show becomes followed when any episode is started or marked watched
-- Imports every currently available season and episode for followed shows
-- Keeps previously imported watched episodes as continuity anchors when they expire
-- Adds new seasons and episodes automatically during periodic refreshes
-- Uses STRM and local NFO files so library items launch the ABC iView add-on
-- Synchronises Kodi library watched, unwatched and resume states with ABC
-- Imports existing linked-account viewing history when Library Integration is enabled
-- Adds automatic local Kodi source configuration with scoped library scans
-- Retains targeted diagnostics under IVIEW200LIB
-
-1.1.5
-- Production release of the watched-state race fix from 1.1.4.2
-- Keeps Kodi's selected episode state authoritative while iView catches up
-- Adds an optional targeted diagnostic logging setting
-- Diagnostics also activate automatically with Kodi global debug logging
-- Redacts account credentials from diagnostic output
-- Suppresses duplicate writes when two detectors catch the same action
-- Retains single-episode queued writes and retry protection
-
-1.1.4.2
-- Fixes the race where Kodi's automatic folder rebuild restored stale iView state
-- Captures the selected episode and baseline while the context menu is open
-- Uses the post-toggle folder rebuild as the reliable watched-action signal
-- Keeps Kodi's local playcount authoritative until iView reports the same state
-- Queues only the selected episode and retries failed iView writes
-- Never scans or changes an entire season
-- Never refreshes Kodi after a watched-state write failure
-
-1.1.4.1 diagnostic
-- Exact 1.1.4 behaviour with diagnostic logging only
-- Logs service invocation, Kodi OnUpdate payloads, selected playcount, 1.1.4 inference decisions, ABC history reads and ABC writes
-
-1.1.4
-- Fixed Kodi Mark unwatched syncing when the selected plugin item briefly disappears
-- Uses VideoLibrary.OnUpdate playcount and a short selected-item grace period
-
-1.1.3
-- Kodi's built-in Mark watched and Mark unwatched actions now sync to ABC iview
-- Removed the duplicate ABC-specific watched context actions
-- ABC episode identifiers are retained on playable item URLs for watched syncing
-
-1.1.2
-- Fixed ABC watched and progress writes to use the current PATCH history API
-- Added the required history query values, including done state
-- Renamed ABC sync context actions to distinguish them from Kodi-only actions
-
-1.1.1
-- Fixed ABC account token renewal after access-token expiry
-- Authenticated ABC requests now retry once after HTTP 401
-
-1.1.0
-- Added two-way watched-status and resume-progress sync with ABC accounts
-- Added Mark watched and Mark unwatched episode context-menu actions
-- Episodes watched on ABC are displayed as watched in Kodi
-
-1.0.2
-- Added Add to My Watchlist and Remove from My Watchlist context-menu actions
-- Added five-minute watchlist-state caching with immediate refresh after changes
-- Uses the current authenticated ABC Seesaw watchlist API
-
-1.0.1
-- Added ABC Account QR-code device linking
-- Added My Watchlist and Continue Watching
-- Added live ABC channels
-- Updated catalogue browsing and playback
-- Packaged under the unique plugin.video.abc_iviewjc add-on ID</news>
+- Adds optional configurable Kodi TV library integration
+- Synchronises watched, unwatched and resume state between generated Kodi-library episodes and ABC accounts
+- Routes generated STRM playback through this add-on</news>
     <platform>all</platform>
     <reuselanguageinvoker>true</reuselanguageinvoker>
     <license>GPL-3.0-only</license>

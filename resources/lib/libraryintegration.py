@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urlparse
@@ -28,18 +29,24 @@ from .librarymeta import (
     show_title,
     tvshow_nfo,
 )
+from .kodiwatchdb import read_plugin_watch_signature
 from .librarysettings import (
     ADDON_ID,
-    SCOPE_BY_INDEX as LIBRARY_SCOPE_BY_INDEX,
+    SCOPE_BY_INDEX,
     SCOPE_MANUAL as LIBRARY_SCOPE_MANUAL,
     SCOPE_WATCHED as LIBRARY_SCOPE_WATCHED,
     SCOPE_WATCHLIST as LIBRARY_SCOPE_WATCHLIST,
+    get_config,
     get_library_enabled,
     get_scope as library_scope,
-    get_scope_index as library_scope_index,
-    set_scope_index as set_library_scope_index,
+    pop_library_requests,
+    queue_library_request,
 )
-from .settings import settings
+from .watchnotification import (
+    notification_playcount,
+    parse_notification_payload,
+    positive_episode_id,
+)
 
 
 ADDON = xbmcaddon.Addon(ADDON_ID)
@@ -56,7 +63,9 @@ REFRESH_INTERVAL = 6 * 60 * 60
 BOOTSTRAP_INTERVAL = 24 * 60 * 60
 QUEUE_RETRY_LIMIT = 4
 MAX_REQUESTS = 200
-STATE_VERSION = 6
+EPISODE_STATE_MISSING_RETRY = 10 * 60
+EPISODE_STATE_MAX_RETRY = 6 * 60 * 60
+STATE_VERSION = 12
 
 def library_enabled():
     # Read this directly from Kodi rather than through a long-lived wrapper,
@@ -75,25 +84,11 @@ def _property_json(name, default):
         return default
 
 
-def _set_property_json(name, value):
-    WINDOW.setProperty(
-        name,
-        json.dumps(value, sort_keys=True, separators=(',', ':')),
-    )
-
-
 def request_library_action(action, **fields):
-    """Send a small cross-interpreter request to the background service."""
+    """Send a durable cross-interpreter request to the service."""
     if not library_enabled():
         return False
-    requests = _property_json(REQUESTS_PROPERTY, [])
-    if not isinstance(requests, list):
-        requests = []
-    request = {'action': action, 'created': time.time()}
-    request.update(fields)
-    requests.append(request)
-    _set_property_json(REQUESTS_PROPERTY, requests[-MAX_REQUESTS:])
-    return True
+    return queue_library_request(action, **fields)
 
 
 def request_follow_show(show_id, source, house_number=''):
@@ -157,17 +152,85 @@ def _jsonrpc(method, params=None):
         )
     return response.get('result') or {}
 
+def _jsonrpc_batch(calls):
+    """Execute a group of JSON-RPC writes in one Kodi request.
+
+    Kodi still reports each changed episode, but sending one batch prevents the
+    service from spreading state writes across one-second ticks and repeatedly
+    disturbing library-backed Home/Favourites controls.
+    """
+    payload = []
+    for index, call in enumerate(calls or [], 1):
+        method, params = call
+        item = {
+            'jsonrpc': '2.0',
+            'method': method,
+            'id': index,
+        }
+        if params is not None:
+            item['params'] = params
+        payload.append(item)
+    if not payload:
+        return []
+
+    raw = xbmc.executeJSONRPC(json.dumps(payload))
+    try:
+        response = json.loads(raw)
+    except Exception:
+        raise RuntimeError('JSON-RPC batch returned invalid JSON')
+    if not isinstance(response, list):
+        raise RuntimeError('JSON-RPC batch returned an invalid response')
+    errors = [row.get('error') for row in response if row.get('error')]
+    if errors:
+        raise RuntimeError('JSON-RPC batch failed: {}'.format(errors))
+    return response
+
 
 def _atomic_write(path, data, binary=False):
+    """Atomically write only when the file content has actually changed.
+
+    Kodi scans use file timestamps as one of their change signals. Replacing
+    every NFO and STRM during a routine catalogue refresh made an unchanged
+    library look newly modified and caused unnecessary rescans.
+    """
     directory = os.path.dirname(path)
     if directory and not os.path.isdir(directory):
         os.makedirs(directory, exist_ok=True)
-    temp = '{}.tmp'.format(path)
-    mode = 'wb' if binary else 'w'
-    kwargs = {} if binary else {'encoding': 'utf-8'}
-    with open(temp, mode, **kwargs) as handle:
-        handle.write(data)
-    os.replace(temp, path)
+
+    if binary:
+        payload = data if isinstance(data, bytes) else bytes(data)
+    else:
+        payload = str(data).encode('utf-8')
+
+    try:
+        with open(path, 'rb') as existing:
+            if existing.read() == payload:
+                return False
+    except FileNotFoundError:
+        pass
+    except Exception:
+        # A failed comparison must not prevent the intended write.
+        pass
+
+    # Keep the temporary file beside the destination so replacement stays
+    # atomic. A unique name also prevents overlapping service instances from
+    # writing through the same fixed ``.tmp`` path.
+    fd, temp = tempfile.mkstemp(
+        prefix='.{}.'.format(os.path.basename(path)),
+        suffix='.tmp',
+        dir=directory or os.curdir,
+    )
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(payload)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+    return True
 
 
 def _read_json(path, default):
@@ -232,11 +295,6 @@ def _path_key(path):
     return _normalise_path(path).replace('\\', '/').lower()
 
 
-def _extract_show_id(namespace):
-    match = re.search(r'(?:^|:)show:([^:]+):video(?:$|:)', str(namespace or ''))
-    return match.group(1) if match else ''
-
-
 class LibraryIntegration(object):
     def __init__(self):
         self.state = _read_json(STATE_FILE, {})
@@ -258,6 +316,10 @@ class LibraryIntegration(object):
         self.state.setdefault('source_ready', False)
         self.state.setdefault('setup_error_notified', False)
         self.state.setdefault('library_scope', '')
+        self.state.setdefault('library_config_revision', -1)
+        self.state.setdefault('library_enabled', None)
+        self.state.setdefault('reconcile_reason', '')
+        self.state.setdefault('tvshow_map', {})
 
         # Force a qualification pass after state/schema upgrades so the
         # active mode is applied and stale generated shows are pruned.
@@ -277,9 +339,21 @@ class LibraryIntegration(object):
         self._clean_needed = False
         self._clean_in_progress = False
         self._clean_started = 0
+        self._owned_clean_active = False
+        self._owned_scan_active = False
         self._library_updates = []
         self._expected_updates = {}
+        self._expected_tvshow_removals = {}
+        self._tvshow_show_map = {
+            int(tvshow_id): str(show_id)
+            for tvshow_id, show_id in (self.state.get('tvshow_map') or {}).items()
+            if str(tvshow_id).isdigit() and show_id
+        }
+        self._next_tvshow_map_refresh = 0
         self._episode_cache = ({}, 0)
+        self._plugin_watch_db_path = ''
+        self._plugin_watch_db_error = ''
+        self._plugin_watch_db_error_at = 0
         self._save()
 
     def _diag(self, event, **fields):
@@ -299,9 +373,15 @@ class LibraryIntegration(object):
             log.warning('Unable to save ABC iView library state: {}'.format(exc))
 
     def _drain_requests(self):
-        requests = _property_json(REQUESTS_PROPERTY, [])
-        if requests:
+        # Consume the durable disk queue first. The window-property queue is
+        # retained only for compatibility with already-running older plugin
+        # interpreters during an in-place upgrade.
+        requests = pop_library_requests(limit=MAX_REQUESTS)
+        legacy_requests = _property_json(REQUESTS_PROPERTY, [])
+        if legacy_requests:
             WINDOW.clearProperty(REQUESTS_PROPERTY)
+        if isinstance(legacy_requests, list):
+            requests.extend(legacy_requests)
         if not isinstance(requests, list):
             return
         for request in requests:
@@ -343,25 +423,65 @@ class LibraryIntegration(object):
                 )
             elif action == 'reconcile_show':
                 self._schedule_qualification_recheck(delay=5)
+                # A watchlist/watched qualification change may add or remove a
+                # TV show. Refresh once after all generated files, cleaning and
+                # scanning have settled; never refresh during each scan.
                 self._diag(
                     'qualification_recheck_requested',
                     show_id=request.get('show_id'),
                     source=request.get('source'),
                 )
             elif action == 'manual_selection_changed':
+                show_id = str(request.get('show_id') or '')
+                included = bool(request.get('included'))
+                # In manual mode, adding one show can be handled immediately
+                # rather than waiting for a full qualification pass over every
+                # selected show. The normal reconciliation is still queued so
+                # removals and any stale entries are cleaned up reliably.
+                if (
+                    included
+                    and show_id
+                    and library_scope() == LIBRARY_SCOPE_MANUAL
+                ):
+                    self.follow_show(
+                        show_id,
+                        source='manual_selection',
+                        priority=True,
+                    )
                 self._schedule_qualification_recheck(delay=0)
                 self._diag(
                     'manual_selection_changed',
-                    show_id=request.get('show_id'),
-                    included=bool(request.get('included')),
+                    show_id=show_id,
+                    included=included,
                 )
             elif action == 'library_scope_changed':
+                self.state['reconcile_reason'] = 'scope_changed'
                 self.state['last_bootstrap'] = 0
                 self._schedule_qualification_recheck(delay=0)
+                self._next_tick = 0
                 self._diag(
                     'library_scope_change_requested',
                     scope=request.get('scope'),
                     index=request.get('index'),
+                )
+            elif action == 'library_settings_changed':
+                self.state['reconcile_reason'] = 'settings_changed'
+                self.state['last_bootstrap'] = 0
+                self._schedule_qualification_recheck(delay=0)
+                self._next_tick = 0
+                self._diag(
+                    'library_settings_change_requested',
+                    enabled=request.get('enabled'),
+                    scope=request.get('scope'),
+                )
+            elif action == 'library_reconcile_now':
+                self.state['reconcile_reason'] = 'manual_reconcile'
+                self.state['last_bootstrap'] = 0
+                self._schedule_qualification_recheck(delay=0)
+                self._next_tick = 0
+                self._diag(
+                    'library_reconcile_requested',
+                    scope=request.get('scope'),
                 )
 
     def _schedule_qualification_recheck(self, delay=5):
@@ -452,6 +572,167 @@ class LibraryIntegration(object):
             if record.get('house_number')
         }
 
+    def _show_id_from_tvshow_details(self, details):
+        """Return the ABC show id for a Kodi TV-show row owned by this add-on."""
+        if not isinstance(details, dict):
+            return ''
+
+        file_path = str(details.get('file') or '')
+        if not file_path or not _path_key(file_path).startswith(_path_key(LIBRARY_ROOT)):
+            return ''
+
+        uniqueid = details.get('uniqueid')
+        if isinstance(uniqueid, dict):
+            show_id = str(uniqueid.get('abciview') or '')
+            if show_id:
+                return show_id
+
+        translated_path = xbmcvfs.translatePath(file_path)
+        folder_path = os.path.normpath(translated_path)
+        folder_name = os.path.basename(folder_path)
+        match = re.search(r'\[ABC ([^\]]+)\]$', folder_name, re.I)
+        if match:
+            return str(match.group(1) or '')
+
+        manifest = _read_json(
+            os.path.join(folder_path, '.abc_iview.json'),
+            {},
+        )
+        if isinstance(manifest, dict):
+            return str(manifest.get('show_id') or '')
+        return ''
+
+    def _store_tvshow_map(self):
+        stored = {
+            str(tvshow_id): str(show_id)
+            for tvshow_id, show_id in self._tvshow_show_map.items()
+            if show_id
+        }
+        if stored != (self.state.get('tvshow_map') or {}):
+            self.state['tvshow_map'] = stored
+            self._save()
+
+    def _refresh_tvshow_map(self, force=False):
+        """Cache Kodi tvshowid -> ABC show id before native removals occur."""
+        now = time.time()
+        if not force and now < self._next_tvshow_map_refresh:
+            return
+        self._next_tvshow_map_refresh = now + 60
+
+        try:
+            response = _jsonrpc(
+                'VideoLibrary.GetTVShows',
+                {
+                    'properties': ['file', 'uniqueid', 'title'],
+                    'limits': {'start': 0, 'end': 10000},
+                },
+            )
+        except Exception as exc:
+            self._diag('tvshow_map_refresh_failed', error=repr(exc))
+            return
+
+        mapping = {}
+        for details in response.get('tvshows') or []:
+            show_id = self._show_id_from_tvshow_details(details)
+            if not show_id:
+                continue
+            try:
+                tvshow_id = int(details.get('tvshowid'))
+            except (TypeError, ValueError):
+                continue
+            mapping[tvshow_id] = show_id
+
+        self._tvshow_show_map = mapping
+        self._store_tvshow_map()
+        self._diag('tvshow_map_refreshed', count=len(mapping))
+
+    def _mark_expected_tvshow_removal(self, tvshow_id, timeout=60):
+        self._expected_tvshow_removals[int(tvshow_id)] = time.time() + timeout
+
+    def _consume_expected_tvshow_removal(self, tvshow_id):
+        now = time.time()
+        for key in list(self._expected_tvshow_removals):
+            if self._expected_tvshow_removals[key] <= now:
+                del self._expected_tvshow_removals[key]
+        expires = self._expected_tvshow_removals.pop(int(tvshow_id), 0)
+        return bool(expires and expires > now)
+
+    def _notification_item(self, data):
+        """Normalise Kodi Monitor and JSON-RPC notification payload shapes."""
+        try:
+            payload = json.loads(data) if isinstance(data, str) and data else data
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            return {}
+
+        nested = payload.get('data')
+        if isinstance(nested, dict):
+            payload = nested
+
+        item = payload.get('item')
+        if isinstance(item, dict):
+            return item
+        if payload.get('id') is not None and payload.get('type'):
+            return payload
+        return {}
+
+    def _handle_tvshow_removed(self, tvshow_id):
+        """Mirror Kodi's native Remove from library into the manual list."""
+        try:
+            tvshow_id = int(tvshow_id)
+        except (TypeError, ValueError):
+            return
+
+        show_id = str(self._tvshow_show_map.pop(tvshow_id, '') or '')
+        self._store_tvshow_map()
+
+        if self._consume_expected_tvshow_removal(tvshow_id):
+            self._diag(
+                'native_tvshow_remove_expected',
+                tvshowid=tvshow_id,
+                show_id=show_id,
+            )
+            return
+
+        if not show_id:
+            self._diag(
+                'native_tvshow_remove_unresolved',
+                tvshowid=tvshow_id,
+            )
+            return
+
+        if not is_manual_show(show_id):
+            self._diag(
+                'native_tvshow_remove_not_manual',
+                tvshowid=tvshow_id,
+                show_id=show_id,
+            )
+            return
+
+        changed = set_manual_show(show_id, False)
+        if not changed:
+            return
+
+        # The native Kodi action has already removed the database row. Queue a
+        # full manual reconciliation so generated files are deleted as well
+        # and a later scan cannot silently add the show back.
+        self.state['reconcile_reason'] = 'native_manual_remove'
+        self.state['last_bootstrap'] = 0
+        self._schedule_qualification_recheck(delay=0)
+        self._next_tick = 0
+        self._diag(
+            'native_tvshow_remove_manual_cleared',
+            tvshowid=tvshow_id,
+            show_id=show_id,
+        )
+        xbmcgui.Dialog().notification(
+            'ABC iView+',
+            'Removed from manual Kodi library selection',
+            xbmcgui.NOTIFICATION_INFO,
+            4000,
+        )
+
     def _remove_unqualified_files(self, qualified_show_ids):
         qualified_show_ids = {
             str(show_id)
@@ -473,9 +754,14 @@ class LibraryIntegration(object):
                 '.abc_iview.json',
             )
             manifest = _read_json(manifest_path, {})
-            show_id = str(
-                manifest.get('show_id') or ''
-            )
+            show_id = str(manifest.get('show_id') or '')
+            if not show_id:
+                # Early generated folders did not always contain a manifest.
+                # Recover the ABC show id from the folder suffix so a scope
+                # downstep can still remove those legacy folders.
+                match = re.search(r'\[ABC ([^\]]+)\]$', name, re.I)
+                if match:
+                    show_id = str(match.group(1) or '')
             if not show_id or show_id in qualified_show_ids:
                 continue
 
@@ -498,6 +784,108 @@ class LibraryIntegration(object):
                     folder=folder,
                     error=repr(exc),
                 )
+
+        return removed
+
+    def _remove_unqualified_library_rows(self, qualified_show_ids):
+        """Remove stale ABC TV-show rows directly from Kodi's database.
+
+        A directory-scoped VideoLibrary.Clean can remove missing episodes yet
+        leave an empty TV-show row behind (displayed as 0 / 0).  Because this
+        add-on owns a dedicated library root, identify TV shows whose database
+        path is below that root and remove any that are not in the active
+        qualification set.
+        """
+        qualified = {
+            str(show_id)
+            for show_id in qualified_show_ids
+            if show_id
+        }
+        removed = []
+
+        try:
+            response = _jsonrpc(
+                'VideoLibrary.GetTVShows',
+                {
+                    'properties': ['file', 'uniqueid', 'title'],
+                    'limits': {'start': 0, 'end': 10000},
+                },
+            )
+        except Exception as exc:
+            log.warning(
+                'Unable to inspect Kodi TV shows for ABC iView cleanup: {}'.format(
+                    exc
+                )
+            )
+            self._diag(
+                'unqualified_library_rows_query_failed',
+                error=repr(exc),
+            )
+            return removed
+
+        for details in response.get('tvshows') or []:
+            file_path = str(details.get('file') or '')
+            show_id = self._show_id_from_tvshow_details(details)
+            if not show_id:
+                continue
+
+            tvshow_id = details.get('tvshowid')
+            try:
+                tvshow_id = int(tvshow_id)
+            except (TypeError, ValueError):
+                self._diag(
+                    'unqualified_library_row_missing_id',
+                    show_id=show_id,
+                    file=file_path,
+                    title=details.get('title'),
+                )
+                continue
+
+            self._tvshow_show_map[tvshow_id] = show_id
+            if show_id in qualified:
+                continue
+
+            try:
+                self._mark_expected_tvshow_removal(tvshow_id)
+                _jsonrpc(
+                    'VideoLibrary.RemoveTVShow',
+                    {'tvshowid': tvshow_id},
+                )
+                token = show_id or 'tvshowid:{}'.format(tvshow_id)
+                removed.append(token)
+                self._diag(
+                    'unqualified_library_row_removed',
+                    show_id=show_id,
+                    tvshowid=tvshow_id,
+                    file=file_path,
+                    title=details.get('title'),
+                )
+            except Exception as exc:
+                self._expected_tvshow_removals.pop(tvshow_id, None)
+                log.warning(
+                    'Unable to remove stale ABC iView TV show {} (Kodi id {}): {}'.format(
+                        show_id or details.get('title') or file_path,
+                        tvshow_id,
+                        exc,
+                    )
+                )
+                self._diag(
+                    'unqualified_library_row_remove_failed',
+                    show_id=show_id,
+                    tvshowid=tvshow_id,
+                    file=file_path,
+                    error=repr(exc),
+                )
+
+        self._store_tvshow_map()
+
+        if removed:
+            log.info(
+                'ABC iView library directly removed {} stale Kodi TV-show rows'.format(
+                    len(removed)
+                )
+            )
+            self._mark_library_changed('stale_tvshow_rows_removed')
 
         return removed
 
@@ -528,10 +916,15 @@ class LibraryIntegration(object):
             }
 
         removed_files = self._remove_unqualified_files(qualified)
-        if removed_files:
+        removed_library = self._remove_unqualified_library_rows(qualified)
+        # A clean is required whenever followed entries, generated files or
+        # direct Kodi rows are removed. The direct RemoveTVShow pass handles
+        # the empty 0 / 0 rows that a scoped clean can leave behind.
+        if removed_ids or removed_files or removed_library:
             self._clean_needed = True
             self._scan_needed = True
             self._episode_cache = ({}, 0)
+            self._mark_library_changed('library_membership_removed')
 
         self.state['followed'] = followed
         self._save()
@@ -541,6 +934,23 @@ class LibraryIntegration(object):
             previously_followed_count=len(previous),
             removed_followed=sorted(removed_ids),
             removed_file_count=len(removed_files),
+            removed_library_count=len(removed_library),
+        )
+        return {
+            'removed_followed': sorted(removed_ids),
+            'removed_files': sorted(removed_files),
+            'removed_library': sorted(removed_library),
+        }
+
+    def _mark_library_changed(self, reason=''):
+        """Record a real mutation for diagnostics only.
+
+        Kodi updates library views from its clean/scan notifications; no
+        additional GUI refresh or retry latch is required.
+        """
+        self._diag(
+            'library_transaction_changed',
+            reason=str(reason or 'library_change'),
         )
 
     def follow_show(
@@ -608,6 +1018,8 @@ class LibraryIntegration(object):
             'duration': max(0, int(duration or 0)),
             'source': str(source or ''),
             'created': time.time(),
+            'not_before': 0,
+            'missing_attempts': 0,
         }
         self._save()
         self._diag(
@@ -690,55 +1102,93 @@ class LibraryIntegration(object):
             )
 
     def handle_notification(self, method, data):
+        if method == 'VideoLibrary.OnRemove':
+            item = self._notification_item(data)
+            if item.get('type') == 'tvshow' and item.get('id') is not None:
+                self._handle_tvshow_removed(item.get('id'))
+            return
         if method == 'VideoLibrary.OnCleanStarted':
             self._clean_in_progress = True
             self._clean_started = time.time()
             self._diag('clean_started_notification')
             return
         if method == 'VideoLibrary.OnCleanFinished':
+            # Kodi may emit CleanFinished automatically after any scan when
+            # <cleanonupdate>true</cleanonupdate> is set. Track ownership
+            # explicitly instead of inferring it from a pending flag, otherwise
+            # an unrelated automatic clean can be mistaken for ours.
+            owned_clean = self._owned_clean_active
+            self._owned_clean_active = False
             self._clean_in_progress = False
             self._clean_started = 0
             self._clean_needed = False
             self._episode_cache = ({}, 0)
-            self._scan_needed = True
-            self._diag('clean_finished_notification')
+            if owned_clean:
+                self._scan_needed = True
+            self._next_tvshow_map_refresh = 0
+            self._diag(
+                'clean_finished_notification',
+                owned=owned_clean,
+                scan_needed=self._scan_needed,
+            )
             return
         if method == 'VideoLibrary.OnScanStarted':
             self._scan_in_progress = True
             self._scan_started = time.time()
-            self._diag('scan_started_notification')
+            self._diag(
+                'scan_started_notification',
+                owned=self._owned_scan_active,
+            )
             return
         if method == 'VideoLibrary.OnScanFinished':
             self._scan_in_progress = False
             self._scan_started = 0
             self._episode_cache = ({}, 0)
-            self._diag('scan_finished_notification')
+            self._next_tvshow_map_refresh = 0
+            owned = self._owned_scan_active
+            self._owned_scan_active = False
+
+            # A scan may have created rows that were previously missing. Make
+            # delayed episode-state writes eligible for one immediate attempt.
+            for state in self.state.get('episode_states', {}).values():
+                state['not_before'] = 0
+
+            if not owned and library_enabled():
+                # Capture Kodi's built-in Update library command. The service
+                # schedules one delayed pass; the qualification bootstrap then
+                # refreshes every currently qualified ABC show.
+                self.state['last_bootstrap'] = 0
+                self._schedule_qualification_recheck(delay=0)
+
+            self._save()
+            self._diag(
+                'scan_finished_notification',
+                owned=owned,
+                external_reconcile=not owned,
+            )
+            # Apply queued states once after an add-on-owned scan. External
+            # scans are followed by a full reconciliation in the service.
+            if owned and self.state.get('episode_states'):
+                self._apply_episode_states(limit=None)
             return
         if method != 'VideoLibrary.OnUpdate':
             return
-        try:
-            payload = json.loads(data) if data else {}
-        except Exception:
-            payload = {}
-        item = payload.get('item') if isinstance(payload, dict) else None
-        item = item if isinstance(item, dict) else {}
-        if item.get('type') != 'episode' or item.get('id') is None:
+        payload = parse_notification_payload(data)
+        episode_id = positive_episode_id(payload)
+        if not episode_id:
+            # Plugin ListItems may report no id, zero or a negative sentinel.
+            # They are handled by ABCMonitor while browsing the add-on and must
+            # never be queued as Kodi database episodes.
             return
-        playcount = payload.get('playcount')
-        if playcount is None:
-            playcount = item.get('playcount')
-        try:
-            playcount = int(playcount) if playcount is not None else None
-        except Exception:
-            playcount = None
+        playcount = notification_playcount(payload)
         self._library_updates.append({
-            'episodeid': int(item['id']),
+            'episodeid': episode_id,
             'playcount': playcount,
             'created': time.time(),
         })
         self._diag(
             'library_onupdate_queued',
-            episodeid=item['id'],
+            episodeid=episode_id,
             playcount=playcount,
         )
 
@@ -772,6 +1222,11 @@ class LibraryIntegration(object):
                 continue
             item = self._resolve_library_episode(update['episodeid'])
             if not item:
+                # Kodi can emit OnUpdate just before the changed episode row is
+                # fully readable. Keep only young notifications for a bounded
+                # event-driven retry; do not restore periodic polling.
+                if time.time() - float(update.get('created') or 0) < 15:
+                    self._library_updates.append(update)
                 continue
             playcount = update.get('playcount')
             if playcount is None:
@@ -828,6 +1283,51 @@ class LibraryIntegration(object):
             'duration': duration,
         }
 
+    def needs_fast_tick(self):
+        """Return True only while a real library transaction needs work.
+
+        The background service sleeps for five seconds when idle. Active
+        clean/scan/import/state work keeps a one-second cadence until that
+        transaction settles. Merely being on a Kodi screen never counts as
+        active work and never causes a refresh.
+        """
+        try:
+            if not get_library_enabled():
+                return False
+        except Exception:
+            return False
+
+        now = time.time()
+        if (
+            self._clean_in_progress
+            or self._scan_in_progress
+            or self._clean_needed
+            or self._scan_needed
+            or bool(self.state.get('queue'))
+            or bool(self.state.get('episode_states'))
+            or not self.state.get('source_ready')
+        ):
+            return True
+
+        qualification_recheck_at = float(
+            self.state.get('qualification_recheck_at') or 0
+        )
+        if qualification_recheck_at and qualification_recheck_at <= now + 5:
+            return True
+
+        try:
+            if any(
+                name.endswith('.json')
+                for name in os.listdir(
+                    os.path.join(PROFILE, 'library_requests')
+                )
+            ):
+                return True
+        except (FileNotFoundError, OSError):
+            pass
+
+        return False
+
     def tick(self, playing=False):
         now = time.time()
         if now < self._next_tick:
@@ -835,7 +1335,49 @@ class LibraryIntegration(object):
         self._next_tick = now + 1.0
         self._drain_requests()
 
-        enabled = library_enabled()
+        config = get_config()
+        enabled = bool(config.get('library_integration'))
+        try:
+            scope_index = int(config.get('library_scope_mode') or 0)
+        except (TypeError, ValueError):
+            scope_index = 0
+        scope = SCOPE_BY_INDEX.get(scope_index, LIBRARY_SCOPE_MANUAL)
+        try:
+            config_revision = int(config.get('revision') or 0)
+        except (TypeError, ValueError):
+            config_revision = 0
+
+        stored_scope = str(self.state.get('library_scope') or '')
+        stored_enabled = self.state.get('library_enabled')
+        try:
+            stored_revision = int(
+                self.state.get('library_config_revision') or 0
+            )
+        except (TypeError, ValueError):
+            stored_revision = -1
+
+        settings_changed = (
+            stored_scope != scope
+            or stored_enabled is None
+            or bool(stored_enabled) != enabled
+        )
+        if config_revision != stored_revision or settings_changed:
+            self.state['library_config_revision'] = config_revision
+            self.state['library_scope'] = scope
+            self.state['library_enabled'] = enabled
+            if settings_changed:
+                self.state['reconcile_reason'] = 'durable_config_changed'
+                self.state['last_bootstrap'] = 0
+                self._schedule_qualification_recheck(delay=0)
+                log.info(
+                    'ABC iView library configuration changed: '
+                    'enabled={}, scope={}, revision={}'.format(
+                        enabled, scope, config_revision
+                    )
+                )
+            else:
+                self._save()
+
         if enabled != self._enabled_last:
             self._enabled_last = enabled
             self._diag('setting_changed', enabled=enabled)
@@ -843,11 +1385,9 @@ class LibraryIntegration(object):
                 self.state['source_ready'] = False
                 self.state['setup_error_notified'] = False
                 self.state['last_bootstrap'] = 0
-                self._schedule_qualification_recheck(delay=1)
+                self._schedule_qualification_recheck(delay=0)
                 self._save()
 
-        scope = library_scope()
-        stored_scope = str(self.state.get('library_scope') or '')
         if scope != self._scope_last:
             previous_scope = self._scope_last
             self._scope_last = scope
@@ -856,14 +1396,7 @@ class LibraryIntegration(object):
                 previous=previous_scope,
                 current=scope,
                 persisted=stored_scope,
-            )
-
-        if stored_scope != scope:
-            self.state['library_scope'] = scope
-            self.state['last_bootstrap'] = 0
-            self._schedule_qualification_recheck(delay=1)
-            log.info(
-                'ABC iView library setting active: {}'.format(scope)
+                revision=config_revision,
             )
 
         if not enabled:
@@ -876,7 +1409,7 @@ class LibraryIntegration(object):
                 self.state['setup_error_notified'] = False
                 self._save()
                 xbmcgui.Dialog().notification(
-                    'ABC iView',
+                    'ABC iView+',
                     'Library Integration enabled',
                     xbmcgui.NOTIFICATION_INFO,
                     4000,
@@ -888,12 +1421,19 @@ class LibraryIntegration(object):
                     self.state['setup_error_notified'] = True
                     self._save()
                     xbmcgui.Dialog().notification(
-                        'ABC iView',
+                        'ABC iView+',
                         'Library setup failed. Check kodi.log',
                         xbmcgui.NOTIFICATION_ERROR,
                         7000,
                     )
                 return
+
+        if (
+            now >= self._next_tvshow_map_refresh
+            and not self._scan_in_progress
+            and not self._clean_in_progress
+        ):
+            self._refresh_tvshow_map()
 
         qualification_recheck_at = float(
             self.state.get('qualification_recheck_at') or 0
@@ -911,16 +1451,23 @@ class LibraryIntegration(object):
             self._queue_refresh_all()
 
         if self._scan_in_progress and now - self._scan_started > 180:
+            owned = self._owned_scan_active
             self._scan_in_progress = False
             self._scan_started = 0
-            self._diag('scan_timeout_released')
+            self._owned_scan_active = False
+            if owned:
+                self._scan_needed = True
+            self._diag('scan_timeout_released', owned=owned)
 
         if self._clean_in_progress and now - self._clean_started > 180:
+            owned = self._owned_clean_active
+            self._owned_clean_active = False
             self._clean_in_progress = False
             self._clean_started = 0
             self._clean_needed = False
-            self._scan_needed = True
-            self._diag('clean_timeout_released')
+            if owned:
+                self._scan_needed = True
+            self._diag('clean_timeout_released', owned=owned)
 
         if playing:
             return
@@ -933,20 +1480,18 @@ class LibraryIntegration(object):
             self._start_clean()
             return
 
-        # Apply states after scans and between catalogue updates.
+        queue_due = self._next_due_show(now)
+
         if (
             not self._scan_in_progress
             and not self._clean_in_progress
-            and self.state['episode_states']
+            and not self._scan_needed
+            and not queue_due
+            and self._episode_state_due(now)
         ):
-            self._apply_episode_states(limit=50)
+            self._apply_episode_states(limit=None)
 
-        queue_due = self._next_due_show(now)
-        should_scan = self._scan_needed and (
-            self._unscanned_shows >= 3
-            or not queue_due
-            or now - self._last_files_written >= 10
-        )
+        should_scan = self._scan_needed and not queue_due
         if (
             should_scan
             and not self._scan_in_progress
@@ -964,6 +1509,130 @@ class LibraryIntegration(object):
             self._sync_next_show(queue_due)
             self._next_show_sync = now + 1.0
 
+
+    def next_work_at(self, playing=False):
+        """Return the next real library-work deadline, or ``0`` when idle.
+
+        The service uses this instead of calling :meth:`tick` every five
+        seconds. Kodi notifications and durable-request wake tokens schedule
+        immediate work; this method schedules only an active transaction,
+        retry or the normal six-hour/twenty-four-hour maintenance deadlines.
+        """
+        now = time.time()
+
+        try:
+            config = get_config()
+            enabled = bool(config.get('library_integration'))
+            revision = int(config.get('revision') or 0)
+        except Exception:
+            enabled = bool(self.state.get('library_enabled'))
+            revision = int(self.state.get('library_config_revision') or 0)
+
+        try:
+            stored_revision = int(
+                self.state.get('library_config_revision') or 0
+            )
+        except (TypeError, ValueError):
+            stored_revision = -1
+
+        if revision != stored_revision:
+            return max(now, float(self._next_tick or 0))
+        if not enabled:
+            return 0.0
+
+        # Library mutation is deliberately deferred while video is playing.
+        # The playback-finished callback schedules the next pass.
+        if playing:
+            return 0.0
+
+        # During a Kodi scan/clean, notifications are the normal wake source.
+        # Keep only a timeout deadline as a safety net; do not poll it.
+        if self._clean_in_progress:
+            started = float(self._clean_started or now)
+            return max(now, started + 180)
+        if self._scan_in_progress:
+            started = float(self._scan_started or now)
+            return max(now, started + 180)
+
+        if (
+            not self.state.get('source_ready')
+            or self._clean_needed
+            or self._scan_needed
+        ):
+            return max(now, float(self._next_tick or 0))
+
+        deadlines = []
+
+        qualification_at = float(
+            self.state.get('qualification_recheck_at') or 0
+        )
+        if qualification_at:
+            deadlines.append(max(
+                qualification_at,
+                float(self._next_tick or 0),
+            ))
+
+        queue = self.state.get('queue') or []
+        if queue:
+            show_due = min(
+                float(row.get('not_before') or 0)
+                for row in queue
+            )
+            deadlines.append(max(
+                now,
+                show_due,
+                float(self._next_show_sync or 0),
+                float(self._next_tick or 0),
+            ))
+
+        episode_state_due = self._next_episode_state_due_at()
+        if episode_state_due:
+            deadlines.append(max(
+                now,
+                episode_state_due,
+                float(self._next_tick or 0),
+            ))
+
+        last_refresh = float(self.state.get('last_refresh') or 0)
+        deadlines.append(
+            max(now, float(self._next_tick or 0))
+            if not last_refresh else max(
+                last_refresh + REFRESH_INTERVAL,
+                float(self._next_tick or 0),
+            )
+        )
+
+        last_bootstrap = float(self.state.get('last_bootstrap') or 0)
+        deadlines.append(
+            max(now, float(self._next_tick or 0))
+            if not last_bootstrap else max(
+                last_bootstrap + BOOTSTRAP_INTERVAL,
+                float(self._next_tick or 0),
+            )
+        )
+
+        if not deadlines:
+            return 0.0
+        return min(deadlines)
+
+
+    def _next_episode_state_due_at(self):
+        states = self.state.get('episode_states') or {}
+        if not states:
+            return 0.0
+        due = min(
+            float(state.get('not_before') or 0)
+            for state in states.values()
+        )
+        # A zero value means immediately due, not "no deadline".
+        return due if due > 0 else time.time()
+
+    def _episode_state_due(self, now=None):
+        now = time.time() if now is None else float(now)
+        due = self._next_episode_state_due_at()
+        return bool(due <= now) if self.state.get('episode_states') else False
+
+
     def _next_due_show(self, now):
         for row in self.state['queue']:
             if float(row.get('not_before') or 0) <= now:
@@ -971,6 +1640,7 @@ class LibraryIntegration(object):
         return None
 
     def _bootstrap_history(self):
+        reconcile_reason = str(self.state.get('reconcile_reason') or '')
         self.state['last_bootstrap'] = time.time()
         self.state['qualification_recheck_at'] = 0
         self._save()
@@ -984,6 +1654,15 @@ class LibraryIntegration(object):
                     'history_bootstrap_skipped_not_logged_in',
                     scope=scope,
                 )
+                self.state['qualification_recheck_at'] = time.time() + 60
+                self._save()
+                if reconcile_reason:
+                    xbmcgui.Dialog().notification(
+                        'ABC iView+',
+                        'ABC Account login is required to apply this library mode',
+                        xbmcgui.NOTIFICATION_WARNING,
+                        6000,
+                    )
                 return
 
             # Manual mode works without an ABC Account. When an account is
@@ -1078,7 +1757,7 @@ class LibraryIntegration(object):
                 else:
                     unavailable_candidate_show_ids.add(show_id)
 
-            self._reconcile_followed(qualified_show_ids)
+            reconcile_result = self._reconcile_followed(qualified_show_ids)
 
             for show_id in sorted(qualified_show_ids):
                 self.follow_show(
@@ -1128,7 +1807,30 @@ class LibraryIntegration(object):
                     availability_lookup_failed
                 ),
             )
+            if reconcile_reason:
+                removed_count = len(
+                    set(reconcile_result.get('removed_followed') or [])
+                    | set(reconcile_result.get('removed_files') or [])
+                    | set(reconcile_result.get('removed_library') or [])
+                )
+                self.state['reconcile_reason'] = ''
+                self._save()
+                xbmcgui.Dialog().notification(
+                    'ABC iView+',
+                    'Library mode applied: {} shows; {} removed. '
+                    'Clean/rescan queued.'.format(
+                        len(qualified_show_ids),
+                        removed_count,
+                    ),
+                    xbmcgui.NOTIFICATION_INFO,
+                    7000,
+                )
         except Exception as exc:
+            # Do not silently postpone a failed mode change for 24 hours.
+            # Keep the reason and retry shortly so transient ABC/Kodi failures
+            # do not make the selector appear inert.
+            self.state['qualification_recheck_at'] = time.time() + 60
+            self._save()
             log.warning(
                 'ABC iView library qualification failed: {}'.format(exc)
             )
@@ -1137,6 +1839,14 @@ class LibraryIntegration(object):
                 scope=library_scope(),
                 error=repr(exc),
             )
+            if reconcile_reason:
+                xbmcgui.Dialog().notification(
+                    'ABC iView+',
+                    'Library reconciliation failed; retrying shortly. '
+                    'Check kodi.log.',
+                    xbmcgui.NOTIFICATION_ERROR,
+                    7000,
+                )
 
     def _queue_refresh_all(self):
         now = time.time()
@@ -1167,10 +1877,12 @@ class LibraryIntegration(object):
         ]
         self._save()
         try:
-            count, new_count = self._sync_show(show_id)
-            self._scan_needed = True
-            self._unscanned_shows += 1
-            self._last_files_written = time.time()
+            count, new_count, changed_count = self._sync_show(show_id)
+            if changed_count:
+                self._scan_needed = True
+                self._unscanned_shows += 1
+                self._last_files_written = time.time()
+                self._mark_library_changed('library_files_changed')
             followed = self.state['followed'].get(show_id) or {}
             followed['last_sync'] = time.time()
             followed['episode_count'] = count
@@ -1178,8 +1890,9 @@ class LibraryIntegration(object):
             self.state['followed'][show_id] = followed
             self._save()
             log.info(
-                'ABC iView library prepared {} episodes for show {} ({} new)'.format(
-                    count, show_id, new_count
+                'ABC iView library prepared {} episodes for show {} '
+                '({} new, {} changed files)'.format(
+                    count, show_id, new_count, changed_count
                 )
             )
             self._diag(
@@ -1187,6 +1900,7 @@ class LibraryIntegration(object):
                 show_id=show_id,
                 episode_count=count,
                 new_count=new_count,
+                changed_file_count=changed_count,
             )
         except Exception as exc:
             attempts = int(queued.get('attempts') or 0) + 1
@@ -1231,12 +1945,14 @@ class LibraryIntegration(object):
         old_manifest = _read_json(manifest_path, {})
         old_episodes = old_manifest.get('episodes', {}) if isinstance(old_manifest, dict) else {}
         new_count = 0
+        changed_count = 0
 
-        _atomic_write(
+        if _atomic_write(
             os.path.join(show_folder, 'tvshow.nfo'),
             tvshow_nfo(show, show_id, records),
             binary=True,
-        )
+        ):
+            changed_count += 1
 
         manifest_episodes = dict(old_episodes)
         new_house_numbers = []
@@ -1252,8 +1968,10 @@ class LibraryIntegration(object):
             if record['house_number'] not in old_episodes:
                 new_count += 1
                 new_house_numbers.append(record['house_number'])
-            _atomic_write(strm_path, plugin_play_url(record) + '\n')
-            _atomic_write(nfo_path, episode_nfo(record), binary=True)
+            if _atomic_write(strm_path, plugin_play_url(record) + '\n'):
+                changed_count += 1
+            if _atomic_write(nfo_path, episode_nfo(record), binary=True):
+                changed_count += 1
             manifest_episodes[record['house_number']] = {
                 'season': record['season'],
                 'episode': record['episode'],
@@ -1293,7 +2011,7 @@ class LibraryIntegration(object):
                     source='new_library_episode',
                 )
 
-        return len(records), new_count
+        return len(records), new_count, changed_count
 
     def _load_all_series(self, api, show):
         href = link_href(show, 'deeplink', 'self')
@@ -1358,15 +2076,28 @@ class LibraryIntegration(object):
         )
 
     def _start_clean(self):
-        result = _jsonrpc(
-            'VideoLibrary.Clean',
-            {
-                'directory': _normalise_path(LIBRARY_ROOT),
-                'showdialogs': False,
-            },
-        )
+        # Set transaction state before JSON-RPC so even an unusually fast Kodi
+        # notification cannot arrive before ownership has been recorded.
+        self._owned_clean_active = True
+        self._clean_needed = False
         self._clean_in_progress = True
         self._clean_started = time.time()
+        try:
+            result = _jsonrpc(
+                'VideoLibrary.Clean',
+                {
+                    'directory': _normalise_path(LIBRARY_ROOT),
+                    'content': 'tvshows',
+                    'showdialogs': False,
+                },
+            )
+        except Exception:
+            self._owned_clean_active = False
+            self._clean_in_progress = False
+            self._clean_started = 0
+            self._clean_needed = True
+            raise
+
         self._diag(
             'clean_requested',
             result=result,
@@ -1375,18 +2106,34 @@ class LibraryIntegration(object):
 
     def _start_scan(self):
         self._ensure_library_source()
-        result = _jsonrpc(
-            'VideoLibrary.Scan',
-            {
-                'directory': _normalise_path(LIBRARY_ROOT),
-                'showdialogs': False,
-            },
-        )
+
+        # Set transaction state before JSON-RPC for the same reason as clean:
+        # ownership must already be visible if Kodi notifies immediately.
+        self._owned_scan_active = True
         self._scan_needed = False
         self._unscanned_shows = 0
         self._scan_in_progress = True
         self._scan_started = time.time()
-        self._diag('scan_requested', result=result, root=LIBRARY_ROOT)
+        try:
+            result = _jsonrpc(
+                'VideoLibrary.Scan',
+                {
+                    'directory': _normalise_path(LIBRARY_ROOT),
+                    'showdialogs': False,
+                },
+            )
+        except Exception:
+            self._owned_scan_active = False
+            self._scan_in_progress = False
+            self._scan_started = 0
+            self._scan_needed = True
+            raise
+
+        self._diag(
+            'scan_requested',
+            result=result,
+            root=LIBRARY_ROOT,
+        )
 
     def _library_episode_map(self, force=False):
         now = time.time()
@@ -1424,28 +2171,57 @@ class LibraryIntegration(object):
         self._episode_cache = (mapping, now + 30)
         return mapping
 
-    def _apply_episode_states(self, limit=50):
+    def _apply_episode_states(self, limit=None):
+        """Apply queued playcount/resume changes as one JSON-RPC batch."""
         try:
             mapping = self._library_episode_map(force=True)
         except Exception as exc:
             self._diag('episode_map_failed', error=repr(exc))
             return
+
         changed_state = False
-        count = 0
         now = time.time()
+        calls = []
+        applied = []
+        processed = 0
+        maximum = None if limit is None else max(0, int(limit))
+
         for house_number in list(self.state['episode_states']):
-            if count >= limit:
+            if maximum is not None and processed >= maximum:
                 break
             state = self.state['episode_states'][house_number]
+            not_before = float(state.get('not_before') or 0)
+            if not_before > now:
+                continue
+
             details = mapping.get(house_number)
             if not details:
-                # Keep states while a scan is pending; expire abandoned entries
-                # after seven days to stop unbounded state growth.
+                # A removed/expired episode can no longer be written in Kodi.
+                # Retain the state for up to seven days, but back off from ten
+                # minutes instead of waking the service every second. Any later
+                # library scan clears this deadline for one immediate retry.
                 if now - float(state.get('created') or now) > 7 * 86400:
                     del self.state['episode_states'][house_number]
                     changed_state = True
+                else:
+                    attempts = int(state.get('missing_attempts') or 0) + 1
+                    delay = min(
+                        EPISODE_STATE_MAX_RETRY,
+                        EPISODE_STATE_MISSING_RETRY * (2 ** (attempts - 1)),
+                    )
+                    state['missing_attempts'] = attempts
+                    state['not_before'] = now + delay
+                    state['last_missing'] = now
+                    changed_state = True
+                    self._diag(
+                        'episode_state_row_missing',
+                        house_number=house_number,
+                        attempts=attempts,
+                        retry_in=delay,
+                    )
                 continue
 
+            processed += 1
             target = 1 if int(state.get('playcount') or 0) > 0 else 0
             current = 1 if int(details.get('playcount') or 0) > 0 else 0
             progress = 0 if target else max(0, int(state.get('progress') or 0))
@@ -1474,22 +2250,56 @@ class LibraryIntegration(object):
                 }
 
             if len(params) > 1:
-                self._expected_updates[int(details['episodeid'])] = {
+                episode_id = int(details['episodeid'])
+                self._expected_updates[episode_id] = {
                     'playcount': target,
-                    'expires': time.time() + 15,
+                    'expires': time.time() + 30,
                 }
-                _jsonrpc('VideoLibrary.SetEpisodeDetails', params)
-                count += 1
-                self._diag(
-                    'episode_state_applied',
-                    house_number=house_number,
-                    episodeid=details['episodeid'],
-                    playcount=target,
-                    progress=progress,
-                )
+                calls.append(('VideoLibrary.SetEpisodeDetails', params))
+                applied.append((
+                    str(house_number),
+                    episode_id,
+                    target,
+                    progress,
+                    dict(state),
+                ))
 
             del self.state['episode_states'][house_number]
             changed_state = True
+
+        if calls:
+            try:
+                _jsonrpc_batch(calls)
+                for house_number, episode_id, target, progress, _state in applied:
+                    self._diag(
+                        'episode_state_applied_batch',
+                        house_number=house_number,
+                        episodeid=episode_id,
+                        playcount=target,
+                        progress=progress,
+                    )
+                self._diag(
+                    'episode_state_batch_complete',
+                    count=len(calls),
+                )
+            except Exception as exc:
+                # Requeue only the rows whose writes were attempted. They will
+                # be retried as one later transaction rather than once a second.
+                for house_number, episode_id, _target, _progress, state in applied:
+                    self._expected_updates.pop(episode_id, None)
+                    state['not_before'] = now + 30
+                    self.state['episode_states'][house_number] = state
+                # Retry later as another single batch, never once per item or
+                # once per service tick.
+                self._schedule_qualification_recheck(delay=30)
+                self._diag(
+                    'episode_state_batch_failed',
+                    count=len(calls),
+                    error=repr(exc),
+                )
+                log.warning(
+                    'ABC iView episode-state batch failed: {}'.format(exc)
+                )
 
         if changed_state:
             self._save()
@@ -1561,6 +2371,44 @@ class LibraryIntegration(object):
             return int(match.group(1)) if match else -1
 
         return max(candidates, key=version)
+
+    def plugin_watch_signature(self, plugin_url):
+        """Read Kodi's native playcount row for an ABC plugin episode.
+
+        The standard ToggleWatched action writes this row even though the item
+        is being browsed through a plugin rather than the scanned TV library.
+        This is a read-only observation path and never edits Kodi's database.
+        """
+        if not plugin_url:
+            return None
+
+        try:
+            db_path = self._plugin_watch_db_path
+            if not db_path or not os.path.exists(db_path):
+                db_path = self._video_database_path()
+                self._plugin_watch_db_path = db_path
+            signature = read_plugin_watch_signature(db_path, plugin_url)
+            self._plugin_watch_db_error = ''
+            return signature
+        except Exception as exc:
+            # Do not flood kodi.log while a remote/locked database is present.
+            message = repr(exc)
+            now = time.time()
+            if (
+                message != self._plugin_watch_db_error
+                or now - self._plugin_watch_db_error_at >= 300
+            ):
+                self._plugin_watch_db_error = message
+                self._plugin_watch_db_error_at = now
+                self._diag(
+                    'plugin_watch_database_unavailable',
+                    error=message,
+                )
+                log.warning(
+                    'Unable to observe native ToggleWatched for ABC plugin '
+                    'items: {}'.format(exc)
+                )
+            return None
 
     def _ensure_source_content(self):
         db_path = self._video_database_path()

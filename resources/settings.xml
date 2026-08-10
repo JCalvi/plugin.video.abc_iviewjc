@@ -3,61 +3,15 @@
   <section id="plugin.video.abc_iviewjc">
     <category id="library" label="30030">
       <group id="1">
-        <setting id="library_integration"
-                 type="boolean"
-                 label="30031"
-                 help="30032">
-          <level>0</level>
-          <default>true</default>
-          <control type="toggle"/>
-        </setting>
-        <setting id="library_scope_select"
+        <setting id="configure_library_integration"
                  type="action"
-                 label="30033"
-                 help="30034">
+                 label="30038"
+                 help="30039">
           <level>0</level>
-          <data>RunScript($CWD/select_library_scope.py)</data>
+          <data>RunScript($CWD/configure_library.py)</data>
           <control type="button" format="action">
-            <close>false</close>
+            <close>true</close>
           </control>
-        </setting>
-        <setting id="library_scope_mode"
-                 type="integer"
-                 label="30033"
-                 help="30034">
-          <level>4</level>
-          <default>1</default>
-          <constraints>
-            <minimum>0</minimum>
-            <step>1</step>
-            <maximum>2</maximum>
-          </constraints>
-          <control type="spinner" format="integer"/>
-        </setting>
-        <setting id="_settings_flush_token"
-                 type="string"
-                 label="30033"
-                 help="30034">
-          <level>4</level>
-          <default/>
-          <constraints>
-            <allowempty>true</allowempty>
-          </constraints>
-          <control type="edit" format="string">
-            <heading>30033</heading>
-          </control>
-        </setting>
-      </group>
-    </category>
-    <category id="diagnostics" label="30020">
-      <group id="1">
-        <setting id="diagnostic_logging"
-                 type="boolean"
-                 label="30021"
-                 help="30022">
-          <level>0</level>
-          <default>false</default>
-          <control type="toggle"/>
         </setting>
       </group>
     </category>

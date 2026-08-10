@@ -12,7 +12,6 @@ from .constants import (
     API_BASE_URL, SEESAW_URL, AUTH_PATH, AUTH_PARAMS,
     SECRET, DRM_AUTH_CLIENT_ID, HEADERS,
 )
-from .language import _
 from .diagnostics import diagnostic_event, redact
 
 

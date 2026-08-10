@@ -3,10 +3,9 @@ import threading
 import time
 
 import xbmc
-import xbmcaddon
 
 
-ADDON_ID = 'plugin.video.abc_iviewjc'
+from .librarysettings import get_diagnostic_logging
 
 _CACHE_SECONDS = 1.0
 _STATE_LOCK = threading.Lock()
@@ -16,21 +15,9 @@ _STATE = (False, False, False)
 
 def _addon_diagnostics_enabled():
     try:
-        addon = xbmcaddon.Addon(ADDON_ID)
-        return bool(
-            addon.getSettings().getBool('diagnostic_logging')
-        )
+        return get_diagnostic_logging()
     except Exception:
-        try:
-            addon = xbmcaddon.Addon(ADDON_ID)
-            return (
-                addon.getSetting('diagnostic_logging')
-                .strip()
-                .lower()
-                in ('1', 'true', 'yes', 'on')
-            )
-        except Exception:
-            return False
+        return False
 
 
 def _kodi_debug_enabled():

@@ -1,6 +1,6 @@
 import re
+import time
 
-import xbmc
 import xbmcgui
 
 from slyguy import plugin, gui, signals, monitor, inputstream, log
@@ -19,49 +19,78 @@ from .libraryintegration import (
 )
 from .watchaction import (
     apply_pending_state,
-    consume_context_refresh,
+    begin_folder_watch_render,
     current_folder_url,
+    detect_folder_watch_changes,
+    enqueue_action,
+    get_folder_watch_state,
+    record_folder_watch_item,
+    set_pending_state,
 )
 
 api = API()
+_RENDER_TOKEN = ''
 
 
 @signals.on(signals.BEFORE_DISPATCH)
 def before_dispatch():
+    global _RENDER_TOKEN
+    _RENDER_TOKEN = str(time.time_ns())
+
     diagnostic_event('IVIEW115LIST', 'before_dispatch_begin')
 
-    # Kodi's built-in watched action automatically rebuilds this folder. Use
-    # that rebuild itself as the reliable signal, before stale iView history
-    # can recreate the selected item with its old playcount.
-    action = consume_context_refresh(
-        current_folder_url()
-    )
-    if action:
-        diagnostic_event(
-            'IVIEW115FIX',
-            'dispatch_action',
-            house_number=action['item']['house_number'],
-            playcount=action['playcount'],
-        )
-        if int(action['playcount'] or 0) > 0:
+    # Kodi's native watched job commits the plugin URL's playcount, clears its
+    # directory cache and reloads the same folder.  That new dispatch is the
+    # event: compare the committed rows with the manifest from the previous
+    # render before obtaining fresh ABC history.
+    folder_url = current_folder_url()
+    for action in detect_folder_watch_changes(
+        folder_url,
+        allow_commit_retry=True,
+    ):
+        item = action['item']
+        playcount = 1 if int(action['playcount'] or 0) > 0 else 0
+
+        set_pending_state(item, playcount, source='plugin_native_watched')
+        enqueue_action(item, playcount, source='plugin_native_watched')
+
+        if playcount:
             request_follow_show(
-                action['item']['show_id'],
-                source='plugin_watched_toggle',
-                house_number=action['item']['house_number'],
+                item['show_id'],
+                source='plugin_native_watched',
+                house_number=item['house_number'],
             )
         else:
             request_reconcile_show(
-                action['item']['show_id'],
-                source='plugin_unwatched_toggle',
+                item['show_id'],
+                source='plugin_native_unwatched',
             )
         request_episode_state(
-            action['item']['show_id'],
-            action['item']['house_number'],
-            action['playcount'],
-            duration=action['item'].get('duration') or 0,
-            source='plugin_watched_toggle',
+            item['show_id'],
+            item['house_number'],
+            playcount,
+            duration=item.get('duration') or 0,
+            source='plugin_native_watched',
         )
 
+        diagnostic_event(
+            'IVIEW115FIX',
+            'native_watched_change',
+            house_number=item['house_number'],
+            playcount=playcount,
+            previous_signature=action.get('previous_signature'),
+            current_signature=action.get('current_signature'),
+        )
+
+    # Start the replacement manifest only after the previous render has
+    # been compared with Kodi's committed watched rows.
+    begin_folder_watch_render(folder_url)
+
+    # The service runs in a separate interpreter and may have changed ABC
+    # history since the previous folder render. Refresh once per dispatch so a
+    # newly watched episode cannot remain displayed as a stale resume item for
+    # the API cache's five-minute lifetime.
+    api.clear_history_cache()
     api.new_session()
     plugin.logged_in = api.logged_in
     diagnostic_event(
@@ -92,12 +121,25 @@ def home(**kwargs):
         log.exception('Failed to load ABC categories: {}'.format(exc))
 
     folder.add_item(label='[B]Search[/B]', path=plugin.url_for(search))
+    folder.add_item(
+        label='[B]Library Integration Settings[/B]',
+        path=plugin.url_for(library_integration_settings),
+        _kiosk=False,
+        bookmark=False,
+    )
     if settings.getBool('bookmarks', True):
         folder.add_item(label=_.BOOKMARKS, path=plugin.url_for(plugin.ROUTE_BOOKMARKS), bookmark=False)
     if api.logged_in:
         folder.add_item(label='Logout', path=plugin.url_for(logout), _kiosk=False, bookmark=False)
     folder.add_item(label=_.SETTINGS, path=plugin.url_for(plugin.ROUTE_SETTINGS), _kiosk=False, bookmark=False)
     return folder
+
+
+@plugin.route()
+def library_integration_settings(**kwargs):
+    from .libraryconfigui import main
+    main()
+
 
 
 @plugin.route()
@@ -149,9 +191,9 @@ def logout(**kwargs):
 def add_to_library(show_id, title='', thumb='', **kwargs):
     changed = set_manual_show(show_id, True)
     gui.notification(
-        'Added to manual Kodi library selection' if changed
+        'Queued for Kodi library import' if changed
         else 'Already in manual Kodi library selection',
-        heading=title or 'ABC iView',
+        heading=title or 'ABC iView+',
         icon=thumb or None,
     )
     gui.refresh()
@@ -161,9 +203,9 @@ def add_to_library(show_id, title='', thumb='', **kwargs):
 def remove_from_library(show_id, title='', thumb='', **kwargs):
     changed = set_manual_show(show_id, False)
     gui.notification(
-        'Removed from manual Kodi library selection' if changed
+        'Queued for removal from Kodi library' if changed
         else 'Not in manual Kodi library selection',
-        heading=title or 'ABC iView',
+        heading=title or 'ABC iView+',
         icon=thumb or None,
     )
     gui.refresh()
@@ -178,7 +220,7 @@ def add_watchlist(show_id, title='', thumb='', **kwargs):
         log.exception('Unable to add show {} to ABC watchlist: {}'.format(show_id, exc))
         gui.notification(
             'Unable to add to My Watchlist: {}'.format(exc),
-            heading=title or 'ABC iView',
+            heading=title or 'ABC iView+',
             icon=thumb or None,
         )
         return
@@ -186,7 +228,7 @@ def add_watchlist(show_id, title='', thumb='', **kwargs):
     request_reconcile_show(show_id, source='watchlist_added')
     gui.notification(
         'Added to My Watchlist',
-        heading=title or 'ABC iView',
+        heading=title or 'ABC iView+',
         icon=thumb or None,
     )
     gui.refresh()
@@ -201,7 +243,7 @@ def remove_watchlist(show_id, title='', thumb='', **kwargs):
         log.exception('Unable to remove show {} from ABC watchlist: {}'.format(show_id, exc))
         gui.notification(
             'Unable to remove from My Watchlist: {}'.format(exc),
-            heading=title or 'ABC iView',
+            heading=title or 'ABC iView+',
             icon=thumb or None,
         )
         return
@@ -209,7 +251,7 @@ def remove_watchlist(show_id, title='', thumb='', **kwargs):
     request_reconcile_show(show_id, source='watchlist_removed')
     gui.notification(
         'Removed from My Watchlist',
-        heading=title or 'ABC iView',
+        heading=title or 'ABC iView+',
         icon=thumb or None,
     )
     gui.refresh()
@@ -238,10 +280,10 @@ def mark_watched(show_id, house_number, duration=0, title='', thumb='', **kwargs
         )
     except Exception as exc:
         log.exception('Unable to mark {} watched: {}'.format(house_number, exc))
-        gui.notification('Unable to mark watched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
+        gui.notification('Unable to mark watched on ABC iview: {}'.format(exc), heading=title or 'ABC iView+')
         return
 
-    gui.notification('Marked watched on ABC iview', heading=title or 'ABC iView', icon=thumb or None)
+    gui.notification('Marked watched on ABC iview', heading=title or 'ABC iView+', icon=thumb or None)
     gui.refresh()
 
 
@@ -262,10 +304,10 @@ def mark_unwatched(show_id, house_number, title='', thumb='', **kwargs):
         )
     except Exception as exc:
         log.exception('Unable to mark {} unwatched: {}'.format(house_number, exc))
-        gui.notification('Unable to mark unwatched on ABC iview: {}'.format(exc), heading=title or 'ABC iView')
+        gui.notification('Unable to mark unwatched on ABC iview: {}'.format(exc), heading=title or 'ABC iView+')
         return
 
-    gui.notification('Marked unwatched on ABC iview', heading=title or 'ABC iView', icon=thumb or None)
+    gui.notification('Marked unwatched on ABC iview', heading=title or 'ABC iView+', icon=thumb or None)
     gui.refresh()
 
 
@@ -602,7 +644,7 @@ def _parse_video(item, fanart=None):
         or ''
     )
     href = item.get('_links', {}).get('self', {}).get('href', '')
-    hn = item.get('houseNumber', '')
+    hn = str(item.get('houseNumber') or '')
     if not href and hn:
         href = '/video/{}'.format(hn)
     if not href:
@@ -629,9 +671,47 @@ def _parse_video(item, fanart=None):
     server_state = dict(state or {})
     state = apply_pending_state(hn, state)
 
-    # Always assign the exact playcount. This is essential when a local
-    # unwatched value must temporarily override stale server done=True.
-    info['playcount'] = 1 if state.get('done') else 0
+    duration = max(0, int(item.get('duration') or 0))
+    progress = max(0, int(state.get('progress') or item.get('_resume') or 0))
+    completed = bool(state.get('done'))
+    if not completed and duration > 0:
+        completed = progress >= duration * 0.90
+    server_playcount = 1 if completed else 0
+
+    # Use a versioned, per-dispatch playable URL. Kodi persists watched and
+    # resume state against the final plugin URL; a fresh render token prevents
+    # an old local row from overriding current ABC account history. The marker
+    # and house number still provide stable identity for native watched actions.
+    show_id = _show_id(item)
+    stable_href = '/video/{}'.format(hn) if hn else href
+    play_path = plugin.url_for(
+        play,
+        url=stable_href,
+        house_number=hn,
+        show_id=show_id or '',
+        iview_watch='4',
+        render_token=_RENDER_TOKEN,
+    )
+
+    local_playcount, has_kodi_row = get_folder_watch_state(
+        hn,
+        server_playcount,
+    ) if hn else (server_playcount, False)
+
+    # ABC history (plus any pending local action) is authoritative for every
+    # fresh list render. A per-dispatch playable URL prevents Kodi from merging
+    # an old plugin-row resume/playcount into the replacement ListItem.
+    effective_playcount = server_playcount
+    info['playcount'] = effective_playcount
+
+    watch_item = {
+        'key': '{}:{}'.format(show_id or '', hn),
+        'show_id': show_id or '',
+        'house_number': hn,
+        'duration': int(item.get('duration') or 0),
+    }
+    if hn and show_id:
+        record_folder_watch_item(watch_item, effective_playcount)
 
     diagnostic_event(
         'IVIEW115LIST',
@@ -639,30 +719,25 @@ def _parse_video(item, fanart=None):
         house_number=hn,
         title=_episode_label(title, subtitle),
         server_state=server_state,
-        final_state=state,
-        assigned_playcount=info['playcount'],
+        pending_state=state,
+        effective_playcount=effective_playcount,
+        kodi_row=has_kodi_row,
+        kodi_row_playcount=local_playcount,
+        assigned_playcount=info.get('playcount'),
+        playable_url=play_path,
     )
 
-    show_id = _show_id(item)
     parsed = plugin.Item(
         label=_episode_label(title, subtitle) or hn or 'ABC iview episode',
         info=info,
         art={'thumb': _thumb(item), 'fanart': fanart or _thumb(item)},
-        # Keep the ABC identifiers on the playable plugin URL. The background
-        # service uses these values when Kodi's built-in Mark watched /
-        # Mark unwatched action changes the selected ListItem playcount.
-        path=plugin.url_for(
-            play,
-            url=href,
-            house_number=hn,
-            show_id=show_id or '',
-            duration=item.get('duration') or 0,
-        ),
+        path=play_path,
         playable=True,
     )
 
-    progress = int(state.get('progress') or item.get('_resume') or 0)
-    if progress and not state.get('done'):
+    # A completed item has no resume point. Only genuine incomplete
+    # playback receives a resume position.
+    if progress and not effective_playcount:
         parsed.resume_from = progress
 
     return parsed

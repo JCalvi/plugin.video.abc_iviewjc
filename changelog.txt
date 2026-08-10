@@ -1,3 +1,151 @@
+2.4.0
+- Renamed the add-on display name to ABC iView+ so it is clearly distinguishable from the older Aussie Add-ons ABC iview add-on.
+- Increased the lightweight scheduler heartbeat from 0.5 seconds to 1.0 second. This heartbeat checks only in-memory deadlines, abort state and the cross-interpreter wake token; it does not poll Kodi list views or call library work.
+- Kept the existing plugin.video.abc_iviewjc add-on ID, settings, generated library paths and ABC iView Library media-source name for seamless in-place upgrades.
+- Retained all 2.3.4 external Update library handling, bounded retries, durable-request safety checking and scan/clean ownership hardening unchanged.
+
+2.3.4
+- Kodi's built-in Update library command now triggers one delayed ABC iView qualification and catalogue reconciliation after the external scan finishes.
+- If reconciliation changes generated files, exactly one add-on-owned scan follows; add-on-owned scan completion and Kodi cleanonupdate cleans are ignored as refresh triggers.
+- Added explicit clean ownership tracking so an unrelated automatic clean cannot be mistaken for an add-on-requested clean.
+- Missing/expired Kodi episode rows now use a ten-minute exponential backoff, capped at six hours, instead of keeping the service on a one-second work cycle.
+- Failed batched episode-state writes are delayed for 30 seconds before retrying.
+- A transient library tick, JSON-RPC or filesystem failure no longer terminates the background service; the transaction is retried after 30 seconds.
+- Added a 60-second on-disk request safety check for missed cross-interpreter wake tokens. It does not call library work unless a real request file exists and does not poll Kodi list views.
+- Scan and clean ownership/state are recorded before JSON-RPC starts, preventing unusually fast notifications from racing transaction setup.
+
+2.3.3
+- Fixed an infinite VideoLibrary scan loop when Kodi cleanonupdate automatically emitted CleanFinished after an add-on-owned scan.
+- A follow-up scan is now requested only after a clean explicitly initiated by the add-on.
+- ScanStarted and add-on-owned ScanFinished notifications no longer schedule redundant catalogue passes.
+- Catalogue work no longer clears an independently pending Kodi watched-state debounce job.
+- Retained all 2.3.2 polling removal, list-view display and bidirectional watched-sync behaviour.
+
+2.3.2
+- Restored Kodi-library watched and unwatched writes to ABC through a dedicated debounced event deadline independent of catalogue maintenance.
+- Fixed a scheduler regression where a far-future maintenance deadline could swallow a new Kodi VideoLibrary.OnUpdate job.
+- Retained unresolved Kodi episode notifications for bounded two-second retries for up to fifteen seconds instead of dropping them.
+- Kept all 2.3.1 polling removal, list-view flicker, fresh-history and completed-without-resume fixes unchanged.
+
+2.3.1
+- Replaced the unconditional one-second/five-second LibraryIntegration service polling with event-driven scheduling from Kodi notifications, durable request wake signals, action retry deadlines and normal six-hour/twenty-four-hour maintenance deadlines.
+- Added a three-second debounce for Kodi library watched notifications so playcount changes are resolved after MyVideos has committed them.
+- Made Apply settings and reconcile now wake the running service immediately while retaining the durable on-disk request queue for restart safety.
+- Removed five-second action-queue polling; Kodi-to-ABC writes now run only when queued or when a specific retry becomes due.
+- Refreshed ABC viewing history once per plugin folder dispatch so service-side watched changes are not hidden by the plugin interpreter's five-minute history cache.
+- Completed episodes now always render with playcount 1 and no resume point, including a 90 percent completion fallback for malformed history rows.
+- Advanced plugin watched URLs to marker 4 and added a per-dispatch render token so stale Kodi plugin rows cannot override current ABC watched/resume state.
+
+2.3.0
+- Promoted the fully working 2.2.10 watched-state and Kodi-library synchronisation behaviour unchanged into the 2.3 release line.
+- Hardened generated library writes with unique same-directory temporary files before atomic replacement, preventing temporary-name collisions between overlapping service instances.
+- Removed confirmed unused imports and private helpers without refactoring the working plugin-browser or Kodi-library watched paths.
+- Reduced addon.xml release metadata to the current release, the proven 2.2.10 baseline and the major 2.0 library release; the complete history remains in this file.
+- Corrected the displayed add-on name in the README installation instructions.
+- Added a separate regression-test package; tests are deliberately not included in the installable add-on ZIP.
+
+2.2.10
+- Rebased the release on 2.2.5 so Kodi-library watched/unwatched notifications, queueing, state version, generated STRM URLs and library metadata remain unchanged.
+- Ported only the event-driven plugin-browser watched handling proven in 2.2.9.
+- Separated plugin-browser MyVideos row matching from the existing library integration module.
+- Reset the plugin render manifest on every dispatch when Kodi reuses the Python interpreter.
+- No selected-item polling, keymap override or Container.Refresh.
+
+2.2.5
+- Removed Container.Refresh and its latches/retry state entirely
+- Poll the visible watched state every 0.10 seconds only while an ABC plugin episode is selected, so Kodi's brief native ToggleWatched transition is not missed
+- Added ListItem.Overlay fallback and throttled database signature reads to 0.50 seconds
+- Retained five-second idle cadence and normal one-second active library/playback cadence
+
+2.2.4
+- Fixed standard keyboard ToggleWatched while browsing ABC iView plugin episodes
+- The service now keeps the selected episode's exact plugin URL and pre-action Kodi database signature
+- Kodi's automatic post-toggle folder rebuild checks the committed playcount before ABC history rebuilds the ListItem
+- A pending local state is installed before rendering, so the one native refresh shows the changed state instead of flashing back
+- Kept the read-only service observer as a fallback; no keymap override or new Container.Refresh call
+
+2.2.3
+- Removed the keyboard/keymap ToggleWatched bridge
+- Observe Kodi's native plugin-item playcount row to handle the standard ToggleWatched action while browsing ABC iView
+- Keep real generated-library episode changes on the positive database episode-id path
+- Poll once per second only while an ABC episode is selected, 0.25 seconds during a transient context-menu action, and five seconds while idle
+- Preserve pause/stop/end progress writes with the three-minute crash-protection fallback
+
+2.2.2
+- Dynamic service cadence: 5 seconds idle, 1 second during active library work, and 0.25 seconds only while an ABC episode/context action needs fast observation
+- Progress sync now occurs on pause/stop/end with a three-minute crash-protection fallback instead of every 30 seconds
+- Added a keyboard ToggleWatched bridge and optional keymap override for the keyboard 1 action
+- Non-ABC items continue to use Kodi's native ToggleWatched action
+- No periodic Container.Refresh was added
+
+2.2.1
+- Removed Container.Refresh from the one-second service tick
+- A refresh can now occur only once in response to VideoLibrary.OnScanFinished for an add-on-owned scan
+- Removed speculative refresh requests from mode, settings, watchlist and manual-selection changes
+- Library mutations are recorded only when files or Kodi rows actually change
+- Batched watched/resume state writes complete before the one post-scan refresh
+- Duplicate and unrelated scan notifications are ignored for refresh purposes
+
+2.2.0
+- Replaced timestamp-based Container.Refresh polling with one end-of-transaction refresh latch
+- Multiple library requests now coalesce into one file reconciliation, one scoped clean when required, one scan when required, and one final refresh
+- Removed all screen-specific deferral logic for Home, Favourites and video-library windows
+- Batched queued Kodi episode playcount/resume writes into one JSON-RPC request after the scan settles
+- A failed final refresh is logged once and is not retried every service tick
+
+2.1.9
+- Deferred qualification, direct row removal, cleaning, scanning and bulk episode-state writes while Home, Favourites or an actual Kodi video-library listing is visible
+- Queued work is allowed while the screensaver is active so unattended maintenance still completes without visible redraws
+- Container.Refresh is never executed on Home or Favourites and is skipped for unrelated add-on/settings windows
+- Video navigation now distinguishes videodb library listings from plug-in browsing rather than treating every window 10025 screen as the TV library
+
+2.1.8
+- Replaced incremental scans after every three shows with one scan after the complete sync queue drains
+- Unchanged NFO and STRM files are no longer replaced, so routine catalogue checks do not manufacture library changes
+- Scans, cleans and bulk watched-state writes wait while Kodi's TV-library window is visible
+- Queued episode states are applied only after all catalogue and scan work is settled
+
+2.1.7
+- Fixed severe TV-library flickering during imports and refreshes
+- Removed the unconditional Container.Refresh after every incremental scan batch
+- Membership changes now queue one deferred refresh after clean, sync and scan work is fully idle
+- Manual additions/removals, watchlist changes and scope changes still update the visible library without a Kodi restart
+
+2.1.6
+- Kodi's native Manage > Remove from library action now also clears the matching manual ABC iView library selection
+- Cached Kodi TV-show IDs identify the removed ABC show after the database row has gone
+- Native manual removals queue generated-folder pruning, clean and reconciliation so the show is not re-added
+- Add-on-initiated RemoveTVShow operations are marked and ignored by the manual-removal listener
+
+2.1.5
+- Directly removes stale ABC TV-show rows from Kodi with VideoLibrary.RemoveTVShow
+- Fixes deleted shows remaining in the library as empty 0 / 0 entries
+- Limits direct removal to database paths below the dedicated ABC iView library root
+- Sets scoped VideoLibrary.Clean content explicitly to tvshows
+- Forces a reconciliation after upgrade and refreshes the current library container
+
+2.1.4
+- Replaced the volatile settings-to-service handoff with a durable on-disk request queue
+- Added a persistent configuration revision token checked by the running service
+- Mode changes now force full qualification, pruning, directory-scoped clean and rescan
+- Legacy generated folders without .abc_iview.json are removable using the [ABC show-id] suffix
+- Added Apply settings and reconcile now plus visible completion/failure notifications
+- Failed reconciliation retries after 60 seconds
+
+2.1.3
+- Fresh installs default to Manual selection only
+- Scope changes immediately requalify the generated library, remove non-qualifying show folders, clean Kodi's database and rescan
+- Cleaning now also runs when stale Kodi rows exist for already-missing generated folders
+- Manual additions are prioritised for import
+- Refreshes the current Kodi container after scans so a restart is not normally required to see changes
+
+2.1.2
+- Moved custom library settings out of profile/settings.xml into an atomically written library_config.json file
+- Replaced the native toggle/list controls with a custom configuration dialog showing the currently saved values
+- Added a direct Library Integration Settings item to the add-on home screen
+- Retained SlyGuy CommonSettings and its standard Settings entry
+- Custom settings are read fresh by the service and verified after every write
+
 2.1.1
 - Fixed the settings-window selector crash caused by importing SlyGuy without an add-on context
 - The scope selector is now self-contained and always opens xbmcaddon.Addon with the explicit add-on ID

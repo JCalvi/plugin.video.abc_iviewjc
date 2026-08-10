@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: ABC iView 1.0.2\n"
+"Project-Id-Version: ABC iView+ 2.4.0\n"
 "Language: en_GB\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
@@ -49,7 +49,7 @@ msgid "Enable diagnostic logging"
 msgstr ""
 
 msgctxt "#30022"
-msgid "Write detailed ABC iView watched-sync diagnostics to kodi.log. Diagnostics are also enabled automatically when Kodi global debug logging is enabled."
+msgid "Write detailed ABC iView+ watched-sync diagnostics to kodi.log. Diagnostics are also enabled automatically when Kodi global debug logging is enabled."
 msgstr ""
 
 msgctxt "#30030"
@@ -61,7 +61,7 @@ msgid "Enable Library Integration"
 msgstr ""
 
 msgctxt "#30032"
-msgid "Add qualifying ABC iView shows to Kodi's TV library. Choose the qualification rule below. All currently available seasons and episodes are imported for each qualifying show."
+msgid "Add qualifying ABC iView+ shows to Kodi's TV library. Choose the qualification rule below. All currently available seasons and episodes are imported for each qualifying show."
 msgstr ""
 
 msgctxt "#30033"
@@ -82,4 +82,32 @@ msgstr ""
 
 msgctxt "#30037"
 msgid "My Watchlist only"
+msgstr ""
+
+msgctxt "#30038"
+msgid "Configure Library Integration"
+msgstr ""
+
+msgctxt "#30039"
+msgid "Open the ABC iView+ library configuration. These values are saved in a dedicated persistent file so they are not removed by the SlyGuy settings migration."
+msgstr ""
+
+msgctxt "#30040"
+msgid "Enabled"
+msgstr ""
+
+msgctxt "#30041"
+msgid "Disabled"
+msgstr ""
+
+msgctxt "#30042"
+msgid "Done"
+msgstr ""
+
+msgctxt "#30043"
+msgid "Diagnostic logging"
+msgstr ""
+
+msgctxt "#30044"
+msgid "Apply settings and reconcile now"
 msgstr ""

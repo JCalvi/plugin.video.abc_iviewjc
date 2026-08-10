@@ -1,18 +1,12 @@
-import json
 import time
-from urllib.parse import parse_qs, urlparse
 
 import xbmc
 import xbmcgui
 
-
 from slyguy import log
 
 from resources.lib.api import API
-from resources.lib.diagnostics import (
-    diagnostic_event,
-    diagnostics_enabled,
-)
+from resources.lib.diagnostics import diagnostic_event, diagnostics_enabled
 from resources.lib.libraryintegration import (
     LibraryIntegration,
     library_enabled,
@@ -21,21 +15,29 @@ from resources.lib.libraryintegration import (
     request_follow_show,
     request_reconcile_show,
 )
+from resources.lib.librarysettings import (
+    LIBRARY_WAKE_PROPERTY,
+    has_library_requests,
+)
 from resources.lib.watchaction import (
     enqueue_action,
-    mark_context_closed,
+    next_action_due_at,
     pop_due_action,
-    set_context_candidate,
     set_pending_state,
 )
 
 
 WINDOW = xbmcgui.Window(10000)
-SYNC_INTERVAL = 30
+SYNC_INTERVAL = 3 * 60
 WATCHED_PERCENT = 0.90
-CONTEXT_POLL_INTERVAL = 0.10
-ADDON_URL_PREFIX = 'plugin://plugin.video.abc_iviewjc/'
-
+SERVICE_LOOP_INTERVAL = 1.0
+STARTUP_DELAY = 3.0
+LIBRARY_REQUEST_DELAY = 2.0
+KODI_UPDATE_DELAY = 3.0
+LIBRARY_FOLLOWUP_DELAY = 1.0
+LIBRARY_TICK_RETRY_DELAY = 30.0
+LIBRARY_REQUEST_SAFETY_INTERVAL = 60.0
+MAX_ACTION_BURST = 50
 
 _DIAG_SEQUENCE = 0
 
@@ -55,61 +57,10 @@ def diag(event, **fields):
     )
 
 
-def raw_gui_state(full=True):
-    labels = {}
-    names = (
-        (
-            'ListItem.FileNameAndPath',
-            'ListItem.Path',
-            'ListItem.FolderPath',
-            'ListItem.PlayCount',
-            'ListItem.Overlay',
-            'ListItem.Label',
-            'ListItem.Title',
-            'ListItem.DBID',
-            'ListItem.MediaType',
-            'Container.FolderPath',
-            'Container.Position',
-            'Container.CurrentItem',
-            'Container.NumItems',
-            'Container.NumAllItems',
-        )
-        if full
-        else ('Container.FolderPath',)
-    )
-    for name in names:
-        try:
-            labels[name] = xbmc.getInfoLabel(name)
-        except Exception as exc:
-            labels[name] = '<ERROR {}>'.format(repr(exc))
-
-    labels['window_id'] = xbmcgui.getCurrentWindowId()
-    labels['dialog_id'] = xbmcgui.getCurrentWindowDialogId()
-
-    conditions = {}
-    for condition in (
-        'Window.IsActive(contextmenu)',
-        'Window.IsVisible(contextmenu)',
-        'Window.IsActive(10106)',
-        'Window.IsVisible(10106)',
-    ):
-        try:
-            conditions[condition] = bool(
-                xbmc.getCondVisibility(condition)
-            )
-        except Exception as exc:
-            conditions[condition] = '<ERROR {}>'.format(repr(exc))
-    labels['conditions'] = conditions
-
-    return labels
-
-
-diag('service_imports_complete')
-
-
 class ABCPlayer(xbmc.Player):
-    def __init__(self):
+    def __init__(self, service_monitor):
         super(ABCPlayer, self).__init__()
+        self.service_monitor = service_monitor
         self.reset()
 
     def reset(self):
@@ -121,12 +72,13 @@ class ABCPlayer(xbmc.Player):
         self.last_synced = -1
 
     def onAVStarted(self):
-        diag('player_av_started', gui=raw_gui_state())
         self.show_id = WINDOW.getProperty('abc_iview.show_id')
         self.house_number = WINDOW.getProperty('abc_iview.house_number')
         self.title = WINDOW.getProperty('abc_iview.title')
         try:
-            self.duration = int(float(WINDOW.getProperty('abc_iview.duration') or 0))
+            self.duration = int(float(
+                WINDOW.getProperty('abc_iview.duration') or 0
+            ))
         except Exception:
             self.duration = 0
         self.position = 0
@@ -137,24 +89,14 @@ class ABCPlayer(xbmc.Player):
         )
 
     def onPlayBackEnded(self):
-        diag(
-            'player_ended',
-            show_id=self.show_id,
-            house_number=self.house_number,
-            position=self.position,
-            duration=self.duration,
-        )
         self.finish(True)
 
     def onPlayBackStopped(self):
-        diag(
-            'player_stopped',
-            show_id=self.show_id,
-            house_number=self.house_number,
-            position=self.position,
-            duration=self.duration,
-        )
         self.finish(False)
+
+    def onPlayBackPaused(self):
+        self.update_position()
+        self.sync_progress(force=True)
 
     def update_position(self):
         if not self.house_number:
@@ -168,14 +110,23 @@ class ABCPlayer(xbmc.Player):
     def sync_progress(self, force=False):
         if not self.show_id or not self.house_number or self.position < 1:
             return
-        if not force and self.last_synced >= 0 and self.position - self.last_synced < SYNC_INTERVAL:
+        if (
+            not force
+            and self.last_synced >= 0
+            and self.position - self.last_synced < SYNC_INTERVAL
+        ):
             return
 
         try:
             api = API()
             api.new_session()
             if api.logged_in:
-                api.set_video_progress(self.show_id, self.house_number, self.position, done=False)
+                api.set_video_progress(
+                    self.show_id,
+                    self.house_number,
+                    self.position,
+                    done=False,
+                )
                 self.last_synced = self.position
                 library_service.on_playback_progress(
                     self.show_id,
@@ -184,11 +135,19 @@ class ABCPlayer(xbmc.Player):
                     self.duration,
                 )
         except Exception as exc:
-            log.warning('ABC watched sync progress failed for {}: {}'.format(self.house_number, exc))
+            log.warning(
+                'ABC watched sync progress failed for {}: {}'.format(
+                    self.house_number,
+                    exc,
+                )
+            )
 
     def finish(self, ended):
         self.update_position()
-        watched = ended or (self.duration > 0 and self.position >= self.duration * WATCHED_PERCENT)
+        watched = ended or (
+            self.duration > 0
+            and self.position >= self.duration * WATCHED_PERCENT
+        )
         try:
             api = API()
             api.new_session()
@@ -197,12 +156,25 @@ class ABCPlayer(xbmc.Player):
                     api.mark_video_watched(
                         self.show_id,
                         self.house_number,
-                        progress=max(self.position, self.duration if ended else 0),
+                        progress=max(
+                            self.position,
+                            self.duration if ended else 0,
+                        ),
                     )
                 elif self.position > 0:
-                    api.set_video_progress(self.show_id, self.house_number, self.position, done=False)
+                    api.set_video_progress(
+                        self.show_id,
+                        self.house_number,
+                        self.position,
+                        done=False,
+                    )
         except Exception as exc:
-            log.warning('ABC watched sync completion failed for {}: {}'.format(self.house_number, exc))
+            log.warning(
+                'ABC watched sync completion failed for {}: {}'.format(
+                    self.house_number,
+                    exc,
+                )
+            )
         finally:
             library_service.on_playback_finished(
                 self.show_id,
@@ -211,57 +183,125 @@ class ABCPlayer(xbmc.Player):
                 self.position,
                 self.duration,
             )
+            # Apply the completed/resume state after playback has settled.
+            self.service_monitor.schedule_library_work(
+                2.0,
+                'playback_finished',
+                debounce=True,
+            )
             self.reset()
 
 
 class ABCMonitor(xbmc.Monitor):
-    """Mirror Kodi's built-in watched toggle to the linked ABC account.
-
-    ABC episodes are plugin list items rather than Kodi database records. Kodi
-    can briefly clear the selected ListItem while the context menu closes,
-    especially when changing a watched item back to unwatched. Keep the last
-    valid ABC item for a short grace period and use VideoLibrary.OnUpdate's
-    playcount value when Kodi supplies it.
-    """
-
-    SELECTION_GRACE = 4.0
-    NOTIFICATION_GRACE = 4.0
+    """Event-driven ABC/Kodi watched and library synchronisation."""
 
     def __init__(self, library):
         super(ABCMonitor, self).__init__()
         self.library = library
-        self._last_item = None
-        self._last_seen = 0.0
-        self._last_playcount = None
-        self._pending_playcount = None
-        self._pending_at = 0.0
         self._last_write = ('', None, 0.0)
-        self._last_diag_signature = None
-        self._last_heartbeat = 0.0
-        self._context_active = False
-        diag(
-            'monitor_created',
-            selection_grace=self.SELECTION_GRACE,
-            notification_grace=self.NOTIFICATION_GRACE,
-            poll_interval=CONTEXT_POLL_INTERVAL,
-            gui=raw_gui_state(),
+        self._next_library_work = 0.0
+        self._library_reason = ''
+        self._next_kodi_watch_work = 0.0
+        self._last_wake_token = WINDOW.getProperty(LIBRARY_WAKE_PROPERTY)
+
+    def schedule_library_work(self, delay=0, reason='', debounce=False):
+        target = time.time() + max(0.0, float(delay or 0))
+        reason = str(reason or '')
+
+        if not self._next_library_work:
+            self._next_library_work = target
+            self._library_reason = reason
+            return
+
+        if debounce:
+            # A user/request event must pre-empt a far-future maintenance
+            # deadline. Only two already-pending event requests debounce each
+            # other by extending to the latest target.
+            if self._library_reason in ('library_followup', 'library_tick_retry'):
+                self._next_library_work = target
+            else:
+                self._next_library_work = max(self._next_library_work, target)
+            if reason:
+                self._library_reason = reason
+            return
+
+        # Maintenance/follow-up work must never overwrite the reason or time of
+        # an earlier event that is already scheduled.
+        if target < self._next_library_work:
+            self._next_library_work = target
+            if reason:
+                self._library_reason = reason
+
+    def schedule_kodi_watch_work(self, delay=KODI_UPDATE_DELAY):
+        target = time.time() + max(0.0, float(delay or 0))
+        # Debounce a burst of VideoLibrary.OnUpdate notifications after the
+        # final MyVideos commit. This deadline is intentionally independent of
+        # catalogue maintenance so a six-hour refresh can never swallow it.
+        self._next_kodi_watch_work = max(
+            float(self._next_kodi_watch_work or 0),
+            target,
         )
 
-    def onSettingsChanged(self):
-        """Apply native settings-dialog changes without restarting Kodi."""
+    def kodi_watch_work_due(self, now=None):
+        now = time.time() if now is None else float(now)
+        return bool(
+            self._next_kodi_watch_work
+            and now >= self._next_kodi_watch_work
+        )
+
+    def consume_kodi_watch_work(self):
+        self._next_kodi_watch_work = 0.0
+
+    def schedule_library_at(self, when, reason='followup'):
         try:
-            enabled = library_enabled()
-            scope = library_scope()
+            when = float(when or 0)
+        except (TypeError, ValueError):
+            return
+        if when <= 0:
+            return
+        delay = max(0.0, when - time.time())
+        self.schedule_library_work(delay, reason)
+
+    def library_work_due(self, now=None):
+        now = time.time() if now is None else float(now)
+        return bool(self._next_library_work and now >= self._next_library_work)
+
+    def consume_library_work(self):
+        reason = self._library_reason or 'scheduled'
+        self._next_library_work = 0.0
+        self._library_reason = ''
+        # Kodi watched updates have an independent debounce deadline. A
+        # catalogue-maintenance pass must never cancel that pending work.
+        return reason
+
+    def check_library_wake_signal(self):
+        token = WINDOW.getProperty(LIBRARY_WAKE_PROPERTY)
+        if token and token != self._last_wake_token:
+            self._last_wake_token = token
+            self.schedule_library_work(
+                LIBRARY_REQUEST_DELAY,
+                'library_request',
+                debounce=True,
+            )
+            return True
+        return False
+
+    def onSettingsChanged(self):
+        try:
             xbmc.log(
                 'plugin.video.abc_iviewjc - Settings saved: '
                 'library_integration={} library_scope={}'.format(
-                    enabled,
-                    scope,
+                    library_enabled(),
+                    library_scope(),
                 ),
                 xbmc.LOGINFO,
             )
-            # The service loop will re-read both values on its next tick.
             self.library._next_tick = 0
+            self.schedule_library_work(
+                LIBRARY_REQUEST_DELAY,
+                'settings_changed',
+                debounce=True,
+            )
         except Exception as exc:
             xbmc.log(
                 'plugin.video.abc_iviewjc - Settings change handling failed: '
@@ -270,496 +310,304 @@ class ABCMonitor(xbmc.Monitor):
             )
 
     def onNotification(self, sender, method, data):
+        before_updates = len(self.library._library_updates)
+        owned_scan_finished = bool(
+            method == 'VideoLibrary.OnScanFinished'
+            and self.library._owned_scan_active
+        )
         self.library.handle_notification(method, data)
-        if method != 'VideoLibrary.OnUpdate':
+        after_updates = len(self.library._library_updates)
+
+        if after_updates > before_updates:
+            self.schedule_kodi_watch_work(KODI_UPDATE_DELAY)
+            log.info(
+                'ABC iView Kodi library watched update queued; '
+                'processing after {:.1f} seconds'.format(KODI_UPDATE_DELAY)
+            )
             return
 
-        # Kodi normally includes playcount in this notification. For plugin
-        # items the item path may disappear for a moment, so defer the write to
-        # the main service loop where the most recently selected ABC episode is
-        # still available.
-        playcount = None
-        try:
-            payload = json.loads(data) if data else {}
-            if isinstance(payload, dict):
-                notification_item = payload.get('item')
-                if (
-                    isinstance(notification_item, dict)
-                    and notification_item.get('type') == 'episode'
-                    and notification_item.get('id') is not None
-                ):
-                    # LibraryIntegration resolves this database episode and
-                    # feeds it back through _sync_state without relying on a
-                    # selected plugin ListItem.
-                    return
-                value = payload.get('playcount')
-                if value is None and isinstance(payload.get('item'), dict):
-                    value = payload['item'].get('playcount')
-                if value is not None:
-                    playcount = int(value)
-        except Exception:
-            pass
-
-        self._pending_playcount = playcount
-        self._pending_at = time.time()
-        diag(
-            'onupdate_queued',
-            parsed_playcount=playcount,
-            pending_at=self._pending_at,
-            cached_item=self._last_item,
-            cached_playcount=self._last_playcount,
-        )
-
-    @staticmethod
-    def _selected_path():
-        for label in (
-            'ListItem.FileNameAndPath',
-            'ListItem.Path',
-            'ListItem.FolderPath',
+        # Start notifications are state markers only. Scheduling a tick for
+        # every ScanStarted/ScanFinished pair can create a feedback loop when
+        # Kodi's cleanonupdate option performs an automatic clean after scans.
+        if method == 'VideoLibrary.OnRemove':
+            self.schedule_library_work(
+                LIBRARY_FOLLOWUP_DELAY,
+                method,
+                debounce=True,
+            )
+        elif (
+            method == 'VideoLibrary.OnCleanFinished'
+            and self.library._scan_needed
         ):
-            value = xbmc.getInfoLabel(label)
-            if value and value.startswith(ADDON_URL_PREFIX):
-                return value
-        return ''
-
-    @staticmethod
-    def _parse_item(path):
-        try:
-            query = parse_qs(urlparse(path).query)
-        except Exception:
-            return None
-
-        def first(name, default=''):
-            values = query.get(name)
-            return values[0] if values else default
-
-        house_number = first('house_number')
-        show_id = first('show_id')
-        source_url = first('url')
-        if not house_number and source_url.startswith('/video/'):
-            house_number = source_url.rsplit('/', 1)[-1]
-
-        try:
-            duration = max(0, int(float(first('duration', '0') or 0)))
-        except Exception:
-            duration = 0
-
-        if not show_id or not house_number:
-            return None
-
-        return {
-            'key': '{}:{}'.format(show_id, house_number),
-            'show_id': show_id,
-            'house_number': house_number,
-            'duration': duration,
-        }
-
-    @staticmethod
-    def _current_playcount():
-        try:
-            return int(xbmc.getInfoLabel('ListItem.PlayCount') or 0)
-        except Exception:
-            return 0
+            # Only an add-on-requested clean needs the generated source scanned
+            # again. External/automatic cleans do not schedule another scan.
+            self.schedule_library_work(
+                LIBRARY_FOLLOWUP_DELAY,
+                method,
+                debounce=True,
+            )
+        elif (
+            method == 'VideoLibrary.OnScanFinished'
+            and not owned_scan_finished
+            and library_enabled()
+        ):
+            # Kodi's normal Update library command is an external scan. Once it
+            # finishes, run one ABC reconciliation. If that pass changes the
+            # generated files it may request one add-on-owned scan; completion
+            # of that owned scan is ignored, so no scan/clean feedback loop can
+            # form.
+            self.schedule_library_work(
+                LIBRARY_FOLLOWUP_DELAY,
+                'external_scan_finished',
+                debounce=True,
+            )
 
     def _sync_state(self, item, playcount):
+        if not item or not item.get('show_id') or not item.get('house_number'):
+            return False
+
         watched = int(playcount or 0) > 0
         now = time.time()
-
-        diag(
-            'sync_state_enter',
-            item=item,
-            playcount=playcount,
-            watched=watched,
-            last_write=self._last_write,
-            gui=raw_gui_state(),
+        key = item.get('key') or '{}:{}'.format(
+            item['show_id'],
+            item['house_number'],
         )
 
         last_key, last_watched, last_time = self._last_write
         if (
-            last_key == item['key']
+            last_key == key
             and last_watched == watched
             and now - last_time < 3
         ):
-            diag(
-                'sync_state_duplicate_suppressed',
-                item=item,
-                watched=watched,
-                age=now - last_time,
-            )
-            return
+            return False
 
-        self._last_write = (item['key'], watched, now)
+        self._last_write = (key, watched, now)
+        normalised = {
+            'key': key,
+            'show_id': str(item['show_id']),
+            'house_number': str(item['house_number']),
+            'duration': int(item.get('duration') or 0),
+        }
 
-        # Kodi is authoritative immediately. Protect the new local playcount
-        # before any automatic folder rebuild or network request.
         set_pending_state(
-            item,
+            normalised,
             1 if watched else 0,
             source='playcount_transition',
         )
-        enqueue_action(
-            item,
+        queued = enqueue_action(
+            normalised,
             1 if watched else 0,
             source='playcount_transition',
         )
+
         if watched:
             request_follow_show(
-                item['show_id'],
+                normalised['show_id'],
                 source='watched_toggle',
-                house_number=item['house_number'],
+                house_number=normalised['house_number'],
             )
         else:
             request_reconcile_show(
-                item['show_id'],
+                normalised['show_id'],
                 source='unwatched_toggle',
             )
+
         request_episode_state(
-            item['show_id'],
-            item['house_number'],
+            normalised['show_id'],
+            normalised['house_number'],
             1 if watched else 0,
-            duration=item.get('duration') or 0,
+            duration=normalised['duration'],
             source='watched_toggle',
         )
         diag(
-            'sync_state_queued',
-            item=item,
+            'library_sync_state_queued',
+            item=normalised,
             watched=watched,
+            action_queued=queued,
         )
+        return True
 
-    def process_action_queue(self):
-        action = pop_due_action()
-        if not action:
-            return
-
-        watched = int(action.get('playcount') or 0) > 0
-        item = {
-            'key': action.get('key'),
-            'show_id': action.get('show_id'),
-            'house_number': action.get('house_number'),
-            'duration': int(action.get('duration') or 0),
-        }
-        attempts = int(action.get('attempts') or 0)
-
-        diag(
-            'queue_action_begin',
-            item=item,
-            watched=watched,
-            attempts=attempts,
-            source=action.get('source'),
-        )
-
-        try:
-            api = API()
-            api.new_session()
-            if not api.logged_in:
-                raise RuntimeError('ABC account is not signed in')
-
-            if watched:
-                api.mark_video_watched(
-                    item['show_id'],
-                    item['house_number'],
-                    progress=max(1, item['duration']),
-                )
-            else:
-                api.mark_video_unwatched(
-                    item['show_id'],
-                    item['house_number'],
-                )
-
-            diag(
-                'queue_action_success',
-                item=item,
-                watched=watched,
-                attempts=attempts,
-            )
-            log.info(
-                'Kodi built-in watched state synced to ABC for {}: {}'.format(
-                    item['house_number'],
-                    'watched' if watched else 'unwatched',
-                )
-            )
-        except Exception as exc:
-            attempts += 1
-            diag(
-                'queue_action_failure',
-                item=item,
-                watched=watched,
-                attempts=attempts,
-                error=repr(exc),
-            )
-
-            if attempts < 4:
-                enqueue_action(
-                    item,
-                    1 if watched else 0,
-                    source='retry',
-                    attempts=attempts,
-                    not_before=time.time() + min(30, 2 ** attempts),
-                )
-            else:
-                log.exception(
-                    'Unable to sync Kodi watched state for {}: {}'.format(
-                        item['house_number'],
-                        exc,
-                    )
-                )
-                xbmcgui.Dialog().notification(
-                    'ABC iView',
-                    'Unable to sync watched status: {}'.format(exc),
-                    xbmcgui.NOTIFICATION_ERROR,
-                    5000,
-                )
-
-            # Deliberately no Container.Refresh. A network problem must never
-            # undo the playcount Kodi has just set.
-
-    def poll_watched_toggle(self):
-        for library_item, library_playcount in self.library.pop_watched_updates():
+    def process_library_watched_updates(self):
+        changed = False
+        for item, playcount in self.library.pop_watched_updates():
             diag(
                 'library_playcount_transition',
-                item=library_item,
-                playcount=library_playcount,
-            )
-            self._sync_state(library_item, library_playcount)
-
-        now = time.time()
-        diagnostic = diagnostics_enabled()
-        gui_state = raw_gui_state(full=diagnostic)
-        path = self._selected_path()
-        item = self._parse_item(path) if path else None
-        playcount = None
-
-        if diagnostic:
-            signature = json.dumps(
-                {
-                    'path': path,
-                    'item': item,
-                    'raw_playcount': gui_state.get('ListItem.PlayCount'),
-                    'overlay': gui_state.get('ListItem.Overlay'),
-                    'label': gui_state.get('ListItem.Label'),
-                    'folder': gui_state.get('Container.FolderPath'),
-                    'position': gui_state.get('Container.Position'),
-                    'current_item': gui_state.get('Container.CurrentItem'),
-                    'window_id': gui_state.get('window_id'),
-                    'dialog_id': gui_state.get('dialog_id'),
-                    'conditions': gui_state.get('conditions'),
-                    'last_item': self._last_item,
-                    'last_playcount': self._last_playcount,
-                    'pending_playcount': self._pending_playcount,
-                    'pending_at': bool(self._pending_at),
-                },
-                sort_keys=True,
-                separators=(',', ':'),
-                default=str,
-            )
-            if signature != self._last_diag_signature:
-                self._last_diag_signature = signature
-                diag(
-                    'poll_state_changed',
-                    path=path,
-                    parsed_item=item,
-                    cached_item=self._last_item,
-                    cached_playcount=self._last_playcount,
-                    pending_playcount=self._pending_playcount,
-                    pending_age=(
-                        now - self._pending_at
-                        if self._pending_at
-                        else None
-                    ),
-                    gui=gui_state,
-                )
-            elif now - self._last_heartbeat >= 5.0:
-                self._last_heartbeat = now
-                diag(
-                    'poll_heartbeat',
-                    path=path,
-                    parsed_item=item,
-                    cached_item=self._last_item,
-                    cached_playcount=self._last_playcount,
-                    pending_playcount=self._pending_playcount,
-                    pending_age=(
-                        now - self._pending_at
-                        if self._pending_at
-                        else None
-                    ),
-                    gui=gui_state,
-                )
-
-        context_active = bool(
-            gui_state.get('conditions', {}).get(
-                'Window.IsActive(contextmenu)'
-            )
-            or gui_state.get('conditions', {}).get(
-                'Window.IsActive(10106)'
-            )
-        )
-
-        if item:
-            playcount = self._current_playcount()
-
-            if context_active and not self._context_active:
-                set_context_candidate(
-                    item,
-                    playcount,
-                    gui_state.get('Container.FolderPath'),
-                )
-                diag(
-                    'context_candidate_set',
-                    item=item,
-                    playcount=playcount,
-                    folder=gui_state.get('Container.FolderPath'),
-                )
-
-            if not context_active and self._context_active:
-                mark_context_closed()
-                diag(
-                    'context_candidate_closed',
-                    item=item,
-                    playcount=playcount,
-                )
-
-            if not self._last_item or item['key'] != self._last_item['key']:
-                # Establish the baseline for a newly selected episode.
-                diag(
-                    'selection_baseline',
-                    item=item,
-                    playcount=playcount,
-                    previous_item=self._last_item,
-                    previous_playcount=self._last_playcount,
-                )
-                self._last_item = item
-                self._last_seen = now
-                self._last_playcount = playcount
-            else:
-                self._last_item = item
-                self._last_seen = now
-                if playcount != self._last_playcount:
-                    diag(
-                        'poll_playcount_transition',
-                        item=item,
-                        previous=self._last_playcount,
-                        current=playcount,
-                        gui=gui_state,
-                    )
-                    self._last_playcount = playcount
-                    self._sync_state(item, playcount)
-
-        # VideoLibrary.OnUpdate is the reliable signal for the 1 -> 0 change.
-        # When Kodi closes the context menu, the selected plugin ListItem may be
-        # blank for a few polling cycles. Use the recently cached ABC item so a
-        # Mark unwatched action is not lost.
-        if self._pending_at:
-            age = now - self._pending_at
-            target = item
-            diag(
-                'pending_processing',
-                age=age,
                 item=item,
-                cached_item=self._last_item,
-                cached_age=(
-                    now - self._last_seen
-                    if self._last_seen
-                    else None
-                ),
-                pending_playcount=self._pending_playcount,
-                cached_playcount=self._last_playcount,
-                gui=gui_state,
+                playcount=playcount,
             )
-            if not target and self._last_item and now - self._last_seen <= self.SELECTION_GRACE:
-                target = self._last_item
-                diag(
-                    'pending_uses_cached_item',
-                    target=target,
-                    cached_age=now - self._last_seen,
-                )
+            changed = self._sync_state(item, playcount) or changed
+        return changed
 
-            if target and age <= self.NOTIFICATION_GRACE:
-                notified_playcount = self._pending_playcount
-                if notified_playcount is None:
-                    # Some Kodi builds omit playcount from the callback. Once
-                    # the ListItem reappears, use its resulting value.
-                    if item:
-                        notified_playcount = playcount
-                        diag(
-                            'pending_uses_reappeared_item_playcount',
-                            playcount=notified_playcount,
-                            item=item,
-                        )
-                    elif self._last_playcount is not None:
-                        # The notification followed a built-in toggle while the
-                        # item vanished. The only possible new state is the
-                        # inverse of the cached baseline.
-                        notified_playcount = 0 if self._last_playcount > 0 else 1
-                        diag(
-                            'pending_inverts_cached_playcount',
-                            cached_playcount=self._last_playcount,
-                            inferred_playcount=notified_playcount,
-                            target=target,
-                        )
+    def process_action_queue(self, max_actions=MAX_ACTION_BURST):
+        processed = False
+        for _unused in range(max(1, int(max_actions or 1))):
+            action = pop_due_action()
+            if not action:
+                break
 
-                if notified_playcount is not None:
-                    diag(
-                        'pending_sync_decision',
-                        target=target,
-                        notified_playcount=notified_playcount,
-                        original_pending_playcount=self._pending_playcount,
+            processed = True
+            watched = int(action.get('playcount') or 0) > 0
+            item = {
+                'key': action.get('key'),
+                'show_id': action.get('show_id'),
+                'house_number': action.get('house_number'),
+                'duration': int(action.get('duration') or 0),
+            }
+            attempts = int(action.get('attempts') or 0)
+
+            try:
+                api = API()
+                api.new_session()
+                if not api.logged_in:
+                    raise RuntimeError('ABC account is not signed in')
+
+                if watched:
+                    api.mark_video_watched(
+                        item['show_id'],
+                        item['house_number'],
+                        progress=max(1, item['duration']),
                     )
-                    self._last_item = target
-                    self._last_seen = now
-                    self._last_playcount = int(notified_playcount)
-                    self._sync_state(target, notified_playcount)
-                    self._pending_at = 0.0
-                    self._pending_playcount = None
-            elif age > self.NOTIFICATION_GRACE:
-                diag(
-                    'pending_expired',
-                    age=age,
-                    item=item,
-                    cached_item=self._last_item,
-                    pending_playcount=self._pending_playcount,
+                else:
+                    api.mark_video_unwatched(
+                        item['show_id'],
+                        item['house_number'],
+                    )
+
+                log.info(
+                    'Kodi built-in watched state synced to ABC for {}: {}'.format(
+                        item['house_number'],
+                        'watched' if watched else 'unwatched',
+                    )
                 )
-                self._pending_at = 0.0
-                self._pending_playcount = None
+            except Exception as exc:
+                attempts += 1
+                if attempts < 4:
+                    enqueue_action(
+                        item,
+                        1 if watched else 0,
+                        source='retry',
+                        attempts=attempts,
+                        not_before=time.time() + min(30, 2 ** attempts),
+                    )
+                else:
+                    log.exception(
+                        'Unable to sync Kodi watched state for {}: {}'.format(
+                            item['house_number'],
+                            exc,
+                        )
+                    )
+                    xbmcgui.Dialog().notification(
+                        'ABC iView+',
+                        'Unable to sync watched status: {}'.format(exc),
+                        xbmcgui.NOTIFICATION_ERROR,
+                        5000,
+                    )
 
-        if not item and not context_active and self._context_active:
-            mark_context_closed()
-            diag(
-                'context_candidate_closed_without_item',
-                cached_item=self._last_item,
-            )
-
-        self._context_active = context_active
-
-        # Do not immediately discard the baseline when Kodi temporarily clears
-        # the selected ListItem. Expire it only after the context-menu grace
-        # period has elapsed.
-        if not item and self._last_item and now - self._last_seen > self.SELECTION_GRACE:
-            diag(
-                'selection_cache_expired',
-                cached_item=self._last_item,
-                cached_playcount=self._last_playcount,
-                age=now - self._last_seen,
-                gui=gui_state,
-            )
-            self._last_item = None
-            self._last_playcount = None
+        return processed
 
 
-diag('service_objects_begin')
 library_service = LibraryIntegration()
-player = ABCPlayer()
 monitor = ABCMonitor(library_service)
-diag('service_loop_started', gui=raw_gui_state())
+player = ABCPlayer(monitor)
+
+monitor.schedule_library_work(STARTUP_DELAY, 'startup')
+next_action_work = time.time() + STARTUP_DELAY
+next_request_safety_check = time.time() + LIBRARY_REQUEST_SAFETY_INTERVAL
+
 while not monitor.abortRequested():
-    if player.isPlayingVideo():
+    now = time.time()
+    playing = player.isPlayingVideo()
+
+    if playing:
         player.update_position()
         player.sync_progress()
 
-    monitor.poll_watched_toggle()
-    monitor.process_action_queue()
-    library_service.tick(playing=player.isPlayingVideo())
+    monitor.check_library_wake_signal()
 
-    if monitor.waitForAbort(CONTEXT_POLL_INTERVAL):
+    # The window-property token is the normal immediate wake mechanism. This
+    # low-frequency disk check is only a safety net for requests created in a
+    # separate interpreter where the token was missed. It never calls the
+    # library service unless an actual request file exists.
+    if now >= next_request_safety_check:
+        next_request_safety_check = (
+            now + LIBRARY_REQUEST_SAFETY_INTERVAL
+        )
+        if has_library_requests():
+            log.info(
+                'ABC iView durable library request found by safety check'
+            )
+            monitor.schedule_library_work(
+                0,
+                'library_request_safety',
+                debounce=True,
+            )
+
+    if next_action_work and now >= next_action_work:
+        monitor.process_action_queue(max_actions=MAX_ACTION_BURST)
+        next_action_work = next_action_due_at()
+
+    # Kodi-library watched changes use their own event deadline. They are
+    # resolved and written to ABC without waiting for, or invoking, a catalogue
+    # maintenance tick.
+    if monitor.kodi_watch_work_due(now):
+        monitor.consume_kodi_watch_work()
+        changed = monitor.process_library_watched_updates()
+        if changed:
+            monitor.process_action_queue(max_actions=MAX_ACTION_BURST)
+            next_action_work = next_action_due_at()
+
+        # If Kodi's row was not resolvable yet, LibraryIntegration retains the
+        # young notification and this bounded retry runs two seconds later.
+        if library_service._library_updates:
+            monitor.schedule_kodi_watch_work(2.0)
+
+    if monitor.library_work_due(now):
+        reason = monitor.consume_library_work()
+        log.info(
+            'ABC iView running scheduled library work: {}'.format(reason)
+        )
+
+        try:
+            library_service.tick(playing=playing)
+            # Requests created by this same pass have already been drained;
+            # consume their wake token so they do not schedule a redundant
+            # empty pass.
+            monitor._last_wake_token = WINDOW.getProperty(
+                LIBRARY_WAKE_PROPERTY
+            )
+
+            # Schedule exactly the next real transaction or maintenance
+            # deadline. There is no idle LibraryIntegration.tick() poll.
+            next_library_work = library_service.next_work_at(
+                playing=playing,
+            )
+            if next_library_work:
+                monitor.schedule_library_at(
+                    next_library_work,
+                    'library_followup',
+                )
+        except Exception as exc:
+            # A transient Kodi JSON-RPC or filesystem error must not terminate
+            # the long-running service. Retry once as a normal delayed event.
+            log.exception(
+                'ABC iView scheduled library work failed ({}): {}'.format(
+                    reason,
+                    exc,
+                )
+            )
+            library_service._next_tick = 0
+            monitor.schedule_library_work(
+                LIBRARY_TICK_RETRY_DELAY,
+                'library_tick_retry',
+            )
+
+    # A plugin-browser native watched action creates both a durable library
+    # request and an ABC action. The wake token schedules the request path; use
+    # the same event to drain the action immediately rather than polling it.
+    if monitor._next_library_work and not next_action_work:
+        due = next_action_due_at()
+        if due:
+            next_action_work = due
+
+    if monitor.waitForAbort(SERVICE_LOOP_INTERVAL):
         break
-
-diag('service_loop_ended')
