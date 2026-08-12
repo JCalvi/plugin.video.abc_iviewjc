@@ -61,9 +61,8 @@ their respective owners. Availability and APIs may change without notice.
 
 ## Credits
 
-- Built on the SlyGuy Kodi add-on framework
-- Catalogue and playback behaviour informed by the earlier open-source ABC
-  iview Kodi add-on from Aussie Addons
+- Built on the SlyGuy Kodi add-on framework, thanks to [Matt Huisman](https://github.com/matthuisman)
+- Catalogue and playback behaviour informed by the earlier open-source ABC iView Kodi add-on from [Aussie Addons](https://aussieaddons.com)
 - ABC Account support uses the connected-TV device-link workflow exposed by
   ABC's television application services
 
