@@ -2,7 +2,7 @@
 <addon id="plugin.video.abc_iviewjc"
        name="ABC iView+"
        provider-name="JCalvi"
-       version="2.4.0">
+       version="2.4.1">
   <requires>
     <import addon="script.module.slyguy" version="0.86.64"/>
   </requires>
@@ -17,7 +17,12 @@
     <summary lang="en_GB">ABC iView+ for Kodi with ABC Account support</summary>
     <description lang="en_GB">Browse and play ABC iview content in Kodi with ABC iView+. Includes ABC Account synchronisation and configurable Kodi TV library integration for manually selected, watched or watchlisted shows.</description>
     <disclaimer lang="en_GB">Unofficial add-on. Not affiliated with or endorsed by the Australian Broadcasting Corporation. ABC and iview names and artwork remain the property of their respective owners.</disclaimer>
-    <news>2.4.0
+    <news>2.4.1
+- Makes the Library Integration enabled slide-over use ABC iView+ artwork instead of the generic information icon
+- Disables the sound for that successful enable notification while retaining audible error notifications
+- Retains all 2.4.0 synchronisation, hardening and one-second scheduler behaviour unchanged
+
+2.4.0
 - Renames the add-on display name to ABC iView+ so it is clearly distinguishable from the older Aussie Add-ons ABC iview add-on
 - Changes the lightweight scheduler heartbeat from 0.5 seconds to 1.0 second
 - Retains the same add-on ID, settings, generated library paths and media-source name so existing installations upgrade in place

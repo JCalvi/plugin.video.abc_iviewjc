@@ -1,3 +1,7 @@
+2.4.1
+- Branded the Library Integration enabled notification with the ABC iView+ add-on icon.
+- Disabled sound for the successful Library Integration enabled notification; errors remain audible.
+
 2.4.0
 - Renamed the add-on display name to ABC iView+ so it is clearly distinguishable from the older Aussie Add-ons ABC iview add-on.
 - Increased the lightweight scheduler heartbeat from 0.5 seconds to 1.0 second. This heartbeat checks only in-memory deadlines, abort state and the cross-interpreter wake token; it does not poll Kodi list views or call library work.

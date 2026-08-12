@@ -31,6 +31,10 @@ be installed alongside the older aussieaddons `plugin.video.abc_iview` add-on.
 3. Select the release ZIP containing the `plugin.video.abc_iviewjc` folder.
 4. Open **ABC iView+** from Video add-ons.
 
+## Upgrade compatibility
+
+ABC iView+ keeps the existing `plugin.video.abc_iviewjc` add-on ID, settings, generated-library paths and `ABC iView Library` media-source name. Upgrading from 2.3.x therefore preserves the current installation and library integration.
+
 ## Account linking
 
 Select **Login** in the add-on. Kodi displays a QR code and linking code.
@@ -63,7 +67,7 @@ their respective owners. Availability and APIs may change without notice.
 
 - Built on the SlyGuy Kodi add-on framework
 - Catalogue and playback behaviour informed by the earlier open-source ABC
-  iview Kodi add-on from Aussie Addons
+  iview Kodi add-on
 - ABC Account support uses the connected-TV device-link workflow exposed by
   ABC's television application services
 
@@ -89,8 +93,8 @@ Library mode changes are handed to the background service through a durable on-d
 
 ## Service cadence and ToggleWatched
 
-The background service is event-driven: Kodi notifications, playback callbacks, durable request wakes and explicit retry deadlines schedule real work. While idle it performs no library tick and never polls the selected item or Kodi's video database. A low-frequency 60-second disk check is only a safety net for an actual queued request whose immediate wake token was missed.
+The background service is event-driven: Kodi notifications, playback callbacks, durable request wakes and explicit retry deadlines schedule real work. While idle it performs no library tick and never polls the selected item or Kodi's video database. A low-frequency 60-second disk check is only a safety net for an actual queued request whose immediate wake token was missed. The add-on never calls `Container.Refresh`.
 
 Playback progress is written when playback is paused, stopped or completed. A three-minute periodic fallback protects resume progress during long uninterrupted playback if Kodi or the device exits unexpectedly.
 
-Plugin-browser Mark watched, Mark unwatched and `ToggleWatched` use Kodi's own committed plugin-URL playcount followed by Kodi's normal folder reload. The next dispatch compares the previous render manifest with the committed read-only database rows and queues the ABC change.
+Plugin-browser Mark watched, Mark unwatched and `ToggleWatched` use Kodi's own committed plugin-URL playcount followed by Kodi's normal folder reload. The next dispatch compares the previous render manifest with the committed read-only database rows and queues the ABC change. Generated Kodi-library episodes remain on the separate 2.2.5 `VideoLibrary.OnUpdate` path using positive episode IDs; the plugin-browser observer does not participate in library-event handling.

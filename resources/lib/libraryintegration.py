@@ -1409,10 +1409,11 @@ class LibraryIntegration(object):
                 self.state['setup_error_notified'] = False
                 self._save()
                 xbmcgui.Dialog().notification(
-                    'ABC iView+',
+                    ADDON.getAddonInfo('name'),
                     'Library Integration enabled',
-                    xbmcgui.NOTIFICATION_INFO,
+                    ADDON.getAddonInfo('icon'),
                     4000,
+                    False,
                 )
             except Exception as exc:
                 self._diag('source_setup_failed', error=repr(exc))
